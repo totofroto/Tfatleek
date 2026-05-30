@@ -129,6 +129,11 @@ async fn query_contextual_memory_match(handle: tauri::AppHandle, incoming_path: 
     core_engine::query_contextual_memory_match(handle, incoming_path).await
 }
 
+#[tauri::command]
+fn get_family_presets() -> Vec<core_engine::FamilyMember> {
+    core_engine::get_default_family_presets()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -142,7 +147,8 @@ pub fn run() {
             execute_file_deletion,
             process_single_dropped_file,
             execute_relocation_commit,
-            query_contextual_memory_match
+            query_contextual_memory_match,
+            get_family_presets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

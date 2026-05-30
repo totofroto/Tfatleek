@@ -33,6 +33,14 @@ interface IngestionManifest {
   detectedDate: string; // YYYY-MM-DD
   suggestedTargetTree: string;
   isTaxRelevant: boolean;
+  identifiedMember: string | null;
+}
+
+interface FamilyMember {
+  key: string;
+  full_name: string;
+  birth_date: string;
+  role: string;
 }
 
 export default function App() {
@@ -58,6 +66,21 @@ export default function App() {
 
   const [pendingManifest, setPendingManifest] = useState<IngestionManifest | null>(null);
   const [selectedStorageTier, setSelectedStorageTier] = useState<"LOCAL" | "NAS">("LOCAL");
+
+  const [familyRegistry, setFamilyRegistry] = useState<FamilyMember[]>([]);
+  const [editableTreePath, setEditableTreePath] = useState<string>("");
+
+  useEffect(() => {
+    const fetchPresets = async () => {
+      try {
+        const presets = await invoke<FamilyMember[]>("get_family_presets");
+        setFamilyRegistry(presets);
+      } catch (error) {
+        console.error("Failed to load family presets:", error);
+      }
+    };
+    fetchPresets();
+  }, []);
 
   useEffect(() => {
     const unlistenFileDrop = getCurrentWindow().onDragDropEvent((event) => {
@@ -282,6 +305,17 @@ export default function App() {
             </div>
             
             <div className="space-y-4 text-xs">
+              {pendingManifest.identifiedMember && (
+                <div className="p-3 bg-blue-950/30 border border-blue-900/50 rounded-lg animate-fade-in mb-2">
+                  <div className="flex items-center gap-2 text-blue-400 font-bold mb-1">
+                    <span>👤 Identity Match Detected</span>
+                  </div>
+                  <p className="text-neutral-300 text-[11px]">
+                    I found context matching <span className="text-blue-400 font-bold">"{pendingManifest.identifiedMember}"</span>. Should I route this to their personalized folder inside <span className="text-emerald-400">{pendingManifest.identifiedCategory}/{pendingManifest.detectedDate.replace(/-/g, '/')}</span>?
+                  </p>
+                </div>
+              )}
+
               <div>
                 <span className="text-neutral-500 block mb-1">IDENTIFIED FILE TYPE / TARGET:</span>
                 <span className="bg-neutral-900 border border-neutral-800 px-2 py-1 rounded text-neutral-200 uppercase font-bold">
@@ -383,305 +417,316 @@ export default function App() {
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto space-y-8">
+      <div className="max-w-[1400px] mx-auto">
         {activeTab === 'dashboard' ? (
-          <>
-            {/* Native OS Drag & Drop Ingestion Panel */}
-            <div className={`mt-4 border-2 border-dashed rounded-xl p-8 transition-all duration-200 text-center flex flex-col items-center justify-center ${
-              isDragging 
-                ? 'border-blue-500 bg-blue-950/20 text-blue-400 scale-[1.01]' 
-                : 'border-neutral-800 bg-neutral-950/40 text-neutral-400 hover:border-neutral-700'
-            }`}>
-              <div className="text-3xl mb-2">📥</div>
-              <div className="font-mono text-xs uppercase tracking-wider font-bold">
-                Paperless Ingestion Gateway
-              </div>
-              <div className="text-[11px] font-mono text-neutral-500 mt-1">
-                Drag & Drop any PDF, Word Document, or Medical DICOM file directly here to route instantly
-              </div>
-              
-              {droppedFileLog && (
-                <div className="mt-3 px-3 py-1 bg-black border border-neutral-900 rounded text-[10px] font-mono text-amber-400 animate-pulse">
-                  ⚡ Status: {droppedFileLog}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            {/* LEFT SIDE: INGESTION GATEWAY (Cols 7) */}
+            <div className="lg:col-span-7 space-y-8">
+              {/* Native OS Drag & Drop Ingestion Panel */}
+              <div className={`mt-4 border-2 border-dashed rounded-xl p-8 transition-all duration-200 text-center flex flex-col items-center justify-center ${
+                isDragging 
+                  ? 'border-blue-500 bg-blue-950/20 text-blue-400 scale-[1.01]' 
+                  : 'border-neutral-800 bg-neutral-950/40 text-neutral-400 hover:border-neutral-700'
+              }`}>
+                <div className="text-3xl mb-2">📥</div>
+                <div className="font-mono text-xs uppercase tracking-wider font-bold">
+                  Paperless Ingestion Gateway
                 </div>
-              )}
-
-              {smartCorrectionAlert && (
-                <div className="mt-3 p-3 bg-amber-950/30 border border-amber-900/60 rounded-lg text-left flex flex-col space-y-1 animate-fade-in">
-                  <div className="text-[11px] font-mono font-bold text-amber-400 uppercase tracking-wide">
-                    🤖 Active Memory Correction Prompt
-                  </div>
-                  <div className="text-[10px] font-mono text-neutral-300">
-                    {smartCorrectionAlert}
-                  </div>
+                <div className="text-[11px] font-mono text-neutral-500 mt-1">
+                  Drag & Drop any PDF, Word Document, or Medical DICOM file directly here to route instantly
                 </div>
-              )}
-            </div>
+                
+                {droppedFileLog && (
+                  <div className="mt-3 px-3 py-1 bg-black border border-neutral-900 rounded text-[10px] font-mono text-amber-400 animate-pulse">
+                    ⚡ Status: {droppedFileLog}
+                  </div>
+                )}
 
-            {/* Input Console Control box */}
-            <section className="bg-neutral-900/40 border border-neutral-900 p-6 rounded-xl space-y-4">
-              <h2 className="text-sm font-mono text-neutral-400 uppercase tracking-wider">// Control Console</h2>
-              <div className="flex gap-4">
-                <input
-                  type="text"
-                  value={targetPath}
-                  onChange={(e) => setTargetPath(e.target.value)}
-                  placeholder="e.g., /Users/username/Desktop or /Volumes/Lockerstor"
-                  className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-4 py-2.5 font-mono text-sm focus:outline-none focus:border-blue-500 text-neutral-200"
-                  disabled={status === "scanning" || status === "batching"}
-                />
-                <button
-                  onClick={handleScan}
-                  disabled={status === "scanning" || status === "batching"}
-                  className="bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium tracking-wide transition-colors duration-150 shadow-md shadow-blue-950/20 cursor-pointer disabled:cursor-not-allowed"
-                >
-                  {status === "scanning" ? "Processing Engine Active..." : "Trigger Scan"}
-                </button>
-                {results.length > 0 && (
-                  <button
-                    onClick={handleBatchOrganize}
-                    disabled={status === "scanning" || status === "batching"}
-                    className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-neutral-800 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium tracking-wide transition-colors duration-150 shadow-md shadow-emerald-950/20 cursor-pointer disabled:cursor-not-allowed"
-                  >
-                    {status === "batching" ? "AI Batching Active..." : "Automated Batch Organize"}
-                  </button>
+                {smartCorrectionAlert && (
+                  <div className="mt-3 p-3 bg-amber-950/30 border border-amber-900/60 rounded-lg text-left flex flex-col space-y-1 animate-fade-in">
+                    <div className="text-[11px] font-mono font-bold text-amber-400 uppercase tracking-wide">
+                      🤖 Active Memory Correction Prompt
+                    </div>
+                    <div className="text-[10px] font-mono text-neutral-300">
+                      {smartCorrectionAlert}
+                    </div>
+                  </div>
                 )}
               </div>
-            </section>
 
-            {/* Dynamic Status / Feedback Logs */}
-            {status === "scanning" && (
-              <div className="p-12 text-center border border-dashed border-neutral-800 rounded-xl space-y-3">
-                <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
-                <p className="text-sm font-mono text-neutral-400 animate-pulse">Scanning file tree hierarchy. Computing size tiers and BLAKE3 blocks...</p>
-              </div>
-            )}
-
-            {status === "batching" && batchProgress && (
-              <div className="p-8 border border-neutral-800 rounded-xl space-y-6 bg-neutral-900/20 animate-fade-in">
-                <div className="flex justify-between items-end">
-                  <div className="space-y-1">
-                    <h3 className="text-xs font-mono text-neutral-400 uppercase tracking-widest">// Batch Progress Engine</h3>
-                    <p className="text-sm font-medium text-neutral-200">Processing: {batchProgress.current_file}</p>
-                  </div>
-                  <p className="text-xs font-mono text-neutral-500">{batchProgress.current} / {batchProgress.total} Files</p>
-                </div>
-                
-                <div className="w-full bg-neutral-900 h-2 rounded-full overflow-hidden border border-neutral-800">
-                  <div 
-                    className="bg-blue-500 h-full transition-all duration-300 ease-out"
-                    style={{ width: `${batchProgress.percentage}%` }}
+              {/* Input Console Control box */}
+              <section className="bg-neutral-900/40 border border-neutral-900 p-6 rounded-xl space-y-4">
+                <h2 className="text-sm font-mono text-neutral-400 uppercase tracking-wider">// Control Console</h2>
+                <div className="flex gap-4">
+                  <input
+                    type="text"
+                    value={targetPath}
+                    onChange={(e) => setTargetPath(e.target.value)}
+                    placeholder="e.g., /Users/username/Desktop or /Volumes/Lockerstor"
+                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-4 py-2.5 font-mono text-sm focus:outline-none focus:border-blue-500 text-neutral-200"
+                    disabled={status === "scanning" || status === "batching"}
                   />
+                  <button
+                    onClick={handleScan}
+                    disabled={status === "scanning" || status === "batching"}
+                    className="bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium tracking-wide transition-colors duration-150 shadow-md shadow-blue-950/20 cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    {status === "scanning" ? "Processing..." : "Trigger Scan"}
+                  </button>
+                  {results.length > 0 && (
+                    <button
+                      onClick={handleBatchOrganize}
+                      disabled={status === "scanning" || status === "batching"}
+                      className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-neutral-800 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium tracking-wide transition-colors duration-150 shadow-md shadow-emerald-950/20 cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      {status === "batching" ? "AI Active..." : "Batch Organize"}
+                    </button>
+                  )}
                 </div>
-                
-                <div className="flex justify-between items-center">
-                  <p className="text-[10px] font-mono text-neutral-500 uppercase tracking-tighter animate-pulse">Gemma 4 executing classification inference...</p>
-                  <p className="text-xs font-bold font-mono text-blue-400">{batchProgress.percentage.toFixed(1)}%</p>
+              </section>
+
+              {/* Dynamic Status / Feedback Logs */}
+              {status === "scanning" && (
+                <div className="p-12 text-center border border-dashed border-neutral-800 rounded-xl space-y-3">
+                  <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
+                  <p className="text-sm font-mono text-neutral-400 animate-pulse">Scanning file tree hierarchy. Computing size tiers and BLAKE3 blocks...</p>
                 </div>
-              </div>
-            )}
+              )}
 
-            {status === "error" && (
-              <div className="bg-red-950/20 border border-red-900/50 text-red-400 px-4 py-3 rounded-lg font-mono text-sm">
-                [SYSTEM ERROR]: {errorMessage}
-              </div>
-            )}
-
-            {/* Results Metrics Data View */}
-            {status === "success" && (
-              <div className="flex flex-col lg:flex-row gap-6 items-start">
-                {/* Left Side: The Scan Manifest Table (Takes up 70% width if file selected) */}
-                <div className={`w-full transition-all duration-300 ${selectedFile ? 'lg:w-2/3' : 'lg:w-full'}`}>
-                  <section className="space-y-4 animate-fade-in min-w-0">
-                    <div className="flex justify-between items-center">
-                      <h3 className="text-md font-mono text-neutral-400 uppercase tracking-wider">// Scan Manifest ({showDuplicatesOnly ? duplicateGroups.length : results.length} {showDuplicatesOnly ? "Groups" : "Files"} Discovered)</h3>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => {
-                            if (showDuplicatesOnly) {
-                              setShowDuplicatesOnly(false);
-                            } else {
-                              fetchIsolatedDuplicates();
-                            }
-                          }}
-                          className={`text-xs font-mono px-3 py-1 rounded border transition-colors cursor-pointer ${showDuplicatesOnly ? 'bg-blue-600 border-blue-500 text-white' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:bg-neutral-800'}`}
-                        >
-                          {showDuplicatesOnly ? "[X] Duplicates Only" : "Show Duplicates Only"}
-                        </button>
-                        <span className="text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full font-mono">
-                          State: Database Synchronized
-                        </span>
-                      </div>
+              {status === "batching" && batchProgress && (
+                <div className="p-8 border border-neutral-800 rounded-xl space-y-6 bg-neutral-900/20 animate-fade-in">
+                  <div className="flex justify-between items-end">
+                    <div className="space-y-1">
+                      <h3 className="text-xs font-mono text-neutral-400 uppercase tracking-widest">// Batch Progress Engine</h3>
+                      <p className="text-sm font-medium text-neutral-200">Processing: {batchProgress.current_file}</p>
                     </div>
-
-                    {showDuplicatesOnly ? (
-                      <div className="mt-6 space-y-4">
-                        <div className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider mb-2">
-                          ⚠️ Cryptographic Duplicate Groups Isolated
-                        </div>
-                        
-                        {/* Map through your grouped duplicate hash states */}
-                        {duplicateGroups.map((group, groupIdx) => (
-                          <div key={groupIdx} className="bg-neutral-950 border border-neutral-850 rounded-lg p-4 shadow-xl">
-                            <div className="flex justify-between items-center border-b border-neutral-900 pb-2 mb-3">
-                              <span className="font-mono text-[10px] text-neutral-500">HASH: <span className="text-neutral-300">{group.hash.substring(0, 16)}...</span></span>
-                              <span className="text-[11px] font-mono bg-neutral-900 px-2 py-0.5 rounded text-amber-400 border border-neutral-800">{group.fileSize}</span>
-                            </div>
-                            
-                            {/* Side-by-side comparison grid split evenly */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              {group.paths.map((file: any, fileIdx: number) => {
-                                const isNas = file.path.includes("sftp://") || file.path.includes("/Volume/NAS");
-                                return (
-                                  <div key={fileIdx} className="bg-black border border-neutral-900 p-3 rounded flex flex-col justify-between">
-                                    <div>
-                                      <div className="flex items-center space-x-2 mb-1">
-                                        <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded ${isNas ? 'bg-blue-950 text-blue-400 border border-blue-900' : 'bg-emerald-950 text-emerald-400 border border-emerald-900'}`}>
-                                          {isNas ? "🖥️ ASUSTOR NAS" : "💻 LOCAL MAC"}
-                                        </span>
-                                        <span className="text-[11px] font-mono text-neutral-400 truncate block max-w-[200px]">
-                                          {file.name}
-                                        </span>
-                                      </div>
-                                      <div className="text-[10px] font-mono text-neutral-600 break-all select-all p-1 bg-neutral-950 rounded border border-neutral-900 mt-1">
-                                        {file.path}
-                                      </div>
-                                    </div>
-                                    
-                                    <button 
-                                      onClick={() => handleDeleteClick(file.path)}
-                                      className="mt-3 w-full bg-red-950/40 hover:bg-red-900/60 border border-red-900/50 hover:border-red-600 text-red-200 font-mono text-[10px] py-1 rounded transition-all tracking-wide uppercase cursor-pointer"
-                                    >
-                                      Vaporize Copy 🗑️
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        ))}
-                        {duplicateGroups.length === 0 && (
-                          <div className="p-8 text-center text-neutral-600 font-mono">No duplicates detected in current database index.</div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="bg-neutral-900/20 border border-neutral-900 rounded-xl overflow-hidden">
-                        <div className="max-h-[600px] overflow-y-auto font-mono text-xs">
-                          <table className="w-full text-left border-collapse">
-                            <thead>
-                              <tr className="bg-neutral-900/60 border-b border-neutral-900 text-neutral-400 uppercase tracking-wider text-[10px] sticky top-0 z-10">
-                                <th className="p-4">File Name</th>
-                                <th className="p-4">Size</th>
-                                <th className="p-4">Full BLAKE3 Hash</th>
-                                <th className="p-4">Absolute Target Path</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-neutral-900">
-                              {results.map((file, idx) => (
-                                <tr 
-                                  key={idx} 
-                                  onClick={() => {
-                                    setSelectedFile(file);
-                                    setAiResult(null);
-                                  }}
-                                  className={`hover:bg-neutral-900/30 transition-colors cursor-pointer ${selectedFile?.file_path === file.file_path ? 'bg-blue-900/20 border-l-2 border-l-blue-500' : ''}`}
-                                >
-                                  <td className="p-4 font-medium text-neutral-200 max-w-[200px] truncate">{file.file_name}</td>
-                                  <td className="p-4 text-neutral-400 whitespace-nowrap">{formatBytes(file.file_size)}</td>
-                                  <td className="p-4 text-blue-400/80 font-semibold">{file.full_hash ? `${file.full_hash.substring(0, 12)}...` : "Skipped (Unique Size)"}</td>
-                                  <td className="p-4 text-neutral-500 truncate max-w-[300px]" title={file.file_path as string}>{file.file_path}</td>
-                                </tr>
-                              ))}
-                              {results.length === 0 && (
-                                <tr>
-                                  <td colSpan={4} className="p-8 text-center text-neutral-600 font-mono">Target directory contains 0 indexable system files.</td>
-                                </tr>
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-                  </section>
+                    <p className="text-xs font-mono text-neutral-500">{batchProgress.current} / {batchProgress.total} Files</p>
+                  </div>
+                  
+                  <div className="w-full bg-neutral-900 h-2 rounded-full overflow-hidden border border-neutral-800">
+                    <div 
+                      className="bg-blue-500 h-full transition-all duration-300 ease-out"
+                      style={{ width: `${batchProgress.percentage}%` }}
+                    />
+                  </div>
+                  
+                  <div className="flex justify-between items-center">
+                    <p className="text-[10px] font-mono text-neutral-500 uppercase tracking-tighter animate-pulse">Gemma 4 executing classification inference...</p>
+                    <p className="text-xs font-bold font-mono text-blue-400">{batchProgress.percentage.toFixed(1)}%</p>
+                  </div>
                 </div>
+              )}
 
-                {/* Right Side: The Sidebar AI Insights Panel (Takes up 30% width) */}
-                {selectedFile && (
-                  <div className="w-full lg:w-1/3 bg-neutral-900 border border-neutral-800 p-6 rounded-xl sticky top-6 animate-slide-in space-y-6 shadow-2xl shadow-black/50">
-                    <div>
-                      <h3 className="text-xs font-mono text-neutral-400 uppercase tracking-widest mb-4">// AI Insights Panel</h3>
+              {status === "error" && (
+                <div className="bg-red-950/20 border border-red-900/50 text-red-400 px-4 py-3 rounded-lg font-mono text-sm">
+                  [SYSTEM ERROR]: {errorMessage}
+                </div>
+              )}
+
+              {/* Results Metrics Data View */}
+              {status === "success" && (
+                <div className="flex flex-col gap-6 items-start">
+                  {/* Left Side: The Scan Manifest Table */}
+                  <div className="w-full">
+                    <section className="space-y-4 animate-fade-in min-w-0">
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-md font-mono text-neutral-400 uppercase tracking-wider">// Scan Manifest ({showDuplicatesOnly ? duplicateGroups.length : results.length} {showDuplicatesOnly ? "Groups" : "Files"})</h3>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => {
+                              if (showDuplicatesOnly) {
+                                setShowDuplicatesOnly(false);
+                              } else {
+                                fetchIsolatedDuplicates();
+                              }
+                            }}
+                            className={`text-xs font-mono px-3 py-1 rounded border transition-colors cursor-pointer ${showDuplicatesOnly ? 'bg-blue-600 border-blue-500 text-white' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:bg-neutral-800'}`}
+                          >
+                            {showDuplicatesOnly ? "[X] Duplicates Only" : "Show Duplicates Only"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {showDuplicatesOnly ? (
+                        <div className="mt-6 space-y-4">
+                          <div className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider mb-2">
+                            ⚠️ Cryptographic Duplicate Groups Isolated
+                          </div>
+                          
+                          {duplicateGroups.map((group, groupIdx) => (
+                            <div key={groupIdx} className="bg-neutral-950 border border-neutral-850 rounded-lg p-4 shadow-xl">
+                              <div className="flex justify-between items-center border-b border-neutral-900 pb-2 mb-3">
+                                <span className="font-mono text-[10px] text-neutral-500">HASH: <span className="text-neutral-300">{group.hash.substring(0, 16)}...</span></span>
+                                <span className="text-[11px] font-mono bg-neutral-900 px-2 py-0.5 rounded text-amber-400 border border-neutral-800">{group.fileSize}</span>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {group.paths.map((file: any, fileIdx: number) => {
+                                  const isNas = file.path.includes("sftp://") || file.path.includes("/Volume/NAS");
+                                  return (
+                                    <div key={fileIdx} className="bg-black border border-neutral-900 p-3 rounded flex flex-col justify-between">
+                                      <div>
+                                        <div className="flex items-center space-x-2 mb-1">
+                                          <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded ${isNas ? 'bg-blue-950 text-blue-400 border border-blue-900' : 'bg-emerald-950 text-emerald-400 border border-emerald-900'}`}>
+                                            {isNas ? "🖥️ ASUSTOR NAS" : "💻 LOCAL MAC"}
+                                          </span>
+                                          <span className="text-[11px] font-mono text-neutral-400 truncate block max-w-[200px]">
+                                            {file.name}
+                                          </span>
+                                        </div>
+                                        <div className="text-[10px] font-mono text-neutral-600 break-all select-all p-1 bg-neutral-950 rounded border border-neutral-900 mt-1">
+                                          {file.path}
+                                        </div>
+                                      </div>
+                                      
+                                      <button 
+                                        onClick={() => handleDeleteClick(file.path)}
+                                        className="mt-3 w-full bg-red-950/40 hover:bg-red-900/60 border border-red-900/50 hover:border-red-600 text-red-200 font-mono text-[10px] py-1 rounded transition-all tracking-wide uppercase cursor-pointer"
+                                      >
+                                        Vaporize Copy 🗑️
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="bg-neutral-900/20 border border-neutral-900 rounded-xl overflow-hidden">
+                          <div className="max-h-[500px] overflow-y-auto font-mono text-xs">
+                            <table className="w-full text-left border-collapse">
+                              <thead>
+                                <tr className="bg-neutral-900/60 border-b border-neutral-900 text-neutral-400 uppercase tracking-wider text-[10px] sticky top-0 z-10">
+                                  <th className="p-4">File Name</th>
+                                  <th className="p-4">Size</th>
+                                  <th className="p-4">Full BLAKE3 Hash</th>
+                                  <th className="p-4">Absolute Target Path</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-neutral-900">
+                                {results.map((file, idx) => (
+                                  <tr 
+                                    key={idx} 
+                                    onClick={() => {
+                                      setSelectedFile(file);
+                                      setAiResult(null);
+                                    }}
+                                    className={`hover:bg-neutral-900/30 transition-colors cursor-pointer ${selectedFile?.file_path === file.file_path ? 'bg-blue-900/20 border-l-2 border-l-blue-500' : ''}`}
+                                  >
+                                    <td className="p-4 font-medium text-neutral-200 max-w-[200px] truncate">{file.file_name}</td>
+                                    <td className="p-4 text-neutral-400 whitespace-nowrap">{formatBytes(file.file_size)}</td>
+                                    <td className="p-4 text-blue-400/80 font-semibold">{file.full_hash ? `${file.full_hash.substring(0, 12)}...` : "Skipped"}</td>
+                                    <td className="p-4 text-neutral-500 truncate max-w-[300px]">{file.file_path}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                  </div>
+
+                  {/* Sidebar AI Insights (Inline if selected) */}
+                  {selectedFile && (
+                    <div className="w-full bg-neutral-900 border border-neutral-800 p-6 rounded-xl animate-slide-in space-y-6 shadow-2xl">
+                      <div className="flex justify-between items-start">
+                        <h3 className="text-xs font-mono text-neutral-400 uppercase tracking-widest">// AI Insights Panel</h3>
+                        <button onClick={() => setSelectedFile(null)} className="text-[10px] text-neutral-500 hover:text-white">✕ Close</button>
+                      </div>
                       <div className="space-y-2">
                         <p className="text-sm font-medium text-neutral-200 break-all">{selectedFile?.file_name}</p>
-                        <p className="text-[10px] text-neutral-500 font-mono truncate" title={selectedFile?.file_path}>{selectedFile?.file_path}</p>
+                        <p className="text-[10px] text-neutral-500 font-mono truncate">{selectedFile?.file_path}</p>
                       </div>
-                    </div>
 
-                    <button
-                      onClick={handleAiAnalyze}
-                      disabled={isAiLoading || !selectedFile}
-                      className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 text-white font-mono text-xs py-3 rounded-lg font-medium transition-all duration-150 shadow-md shadow-blue-950/20 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
-                    >
-                      {isAiLoading ? (
-                        <>
-                          <div className="animate-spin rounded-full h-3 w-3 border-t border-b border-white"></div>
-                          Gemma 4 Thinking...
-                        </>
-                      ) : (
-                        "Analyze Content with Gemma 4"
-                      )}
-                    </button>
+                      <button
+                        onClick={handleAiAnalyze}
+                        disabled={isAiLoading}
+                        className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 text-white font-mono text-xs py-3 rounded-lg font-medium transition-all cursor-pointer"
+                      >
+                        {isAiLoading ? "Gemma 4 Thinking..." : "Analyze Content with Gemma 4"}
+                      </button>
 
-                    {aiResult && (
-                      <div className="space-y-6 animate-fade-in border-t border-neutral-800 pt-6">
-                        <div className="space-y-4">
+                      {aiResult && (
+                        <div className="space-y-4 animate-fade-in border-t border-neutral-800 pt-4">
                           <div className="flex justify-between items-start">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono tracking-tighter">Confidence Score</label>
+                            <label className="text-[10px] text-neutral-500 uppercase font-mono">Confidence</label>
                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${aiResult.confidence_score > 0.8 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
                               {(aiResult.confidence_score * 100).toFixed(1)}%
                             </span>
                           </div>
-                          
                           <div className="space-y-1">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono tracking-tighter">Suggested Subfolder</label>
-                            <p className="text-sm font-mono text-blue-400 bg-blue-900/10 border border-blue-900/30 p-2 rounded">
-                              {aiResult.suggested_subfolder}
-                            </p>
+                            <label className="text-[10px] text-neutral-500 uppercase font-mono">Category</label>
+                            <p className="text-sm font-mono text-blue-400 bg-blue-900/10 border border-blue-900/30 p-2 rounded">{aiResult.suggested_subfolder}</p>
                           </div>
-
                           <div className="space-y-1">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono tracking-tighter">New Clean Name</label>
-                            <p className="text-sm font-medium text-neutral-200">
-                              {aiResult.new_clean_name}
-                            </p>
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono tracking-tighter">AI Reasoning</label>
-                            <p className="text-[11px] text-neutral-400 leading-relaxed italic border-l-2 border-neutral-800 pl-3">
-                              "{aiResult.reasoning}"
-                            </p>
+                            <label className="text-[10px] text-neutral-500 uppercase font-mono">Reasoning</label>
+                            <p className="text-[11px] text-neutral-400 leading-relaxed italic border-l-2 border-neutral-800 pl-3">"{aiResult.reasoning}"</p>
                           </div>
                         </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
-                    {!aiResult && !isAiLoading && (
-                      <div className="text-center py-8 border border-dashed border-neutral-800 rounded-lg">
-                        <p className="text-[10px] text-neutral-600 font-mono">No active analysis for this node.</p>
-                      </div>
-                    )}
-
-                    <button 
-                      onClick={() => setSelectedFile(null)}
-                      className="w-full text-[10px] font-mono text-neutral-500 hover:text-neutral-300 transition-colors"
-                    >
-                      [Close Panel]
-                    </button>
-                  </div>
-                )}
+            {/* RIGHT SIDE: INTERACTIVE ADMIN CONTROL PANEL (Cols 5) */}
+            <div className="lg:col-span-5 bg-neutral-950 border border-neutral-800 rounded-xl p-5 space-y-6 sticky top-8">
+              <div className="text-xs font-bold text-blue-400 border-b border-neutral-900 pb-2 uppercase tracking-wider">
+                👥 Family Identity & Profile Registry Presets
               </div>
-            )}
-          </>
+              
+              <div className="space-y-3">
+                {familyRegistry.map((member, index) => (
+                  <div key={member.key} className="bg-neutral-900/60 p-3 rounded-lg border border-neutral-850 text-[11px] flex flex-col space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-neutral-400 uppercase font-bold text-[10px]">{member.role}</span>
+                      <span className="text-neutral-500 font-bold">ID: {member.key}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input 
+                        type="text" 
+                        value={member.full_name} 
+                        className="bg-black border border-neutral-800 px-2 py-1 rounded text-white focus:border-blue-500 outline-none"
+                        onChange={(e) => {
+                          const updated = [...familyRegistry];
+                          updated[index].full_name = e.target.value;
+                          setFamilyRegistry(updated);
+                        }}
+                      />
+                      <input 
+                        type="text" 
+                        value={member.birth_date} 
+                        placeholder="DD.MM.YYYY"
+                        className="bg-black border border-neutral-800 px-2 py-1 rounded text-neutral-400 text-center focus:border-blue-500 outline-none"
+                        onChange={(e) => {
+                          const updated = [...familyRegistry];
+                          updated[index].birth_date = e.target.value;
+                          setFamilyRegistry(updated);
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="text-xs font-bold text-emerald-400 border-b border-neutral-900 pb-2 pt-2 uppercase tracking-wider">
+                🌳 Sortment Tree Path Fine-Tuning
+              </div>
+              <div className="p-3 bg-neutral-900/40 border border-neutral-850 rounded-lg text-xs space-y-2">
+                <span className="text-neutral-500 text-[10px] block">ACTIVE MANUALLY CONFIGURABLE DESTINATION PATH:</span>
+                <input 
+                  type="text"
+                  value={editableTreePath}
+                  onChange={(e) => setEditableTreePath(e.target.value)}
+                  className="w-full bg-black border border-neutral-800 px-3 py-2 rounded text-emerald-400 font-mono text-[11px] focus:border-emerald-500 outline-none"
+                  placeholder="Tfatleek_Output/Medizinische_Praxis/2026/05_Month"
+                />
+              </div>
+            </div>
+          </div>
         ) : (
           <section className="bg-neutral-900/40 border border-neutral-900 p-8 rounded-xl space-y-8 animate-fade-in">
             <div className="space-y-2">

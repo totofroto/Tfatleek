@@ -14,6 +14,7 @@ pub struct AiClassificationResult {
     pub confidence_score: f64,
     pub reasoning: String,
     pub is_tax_relevant: bool,
+    pub identified_member: Option<String>,
 }
 
 pub async fn request_file_classification(
@@ -24,7 +25,7 @@ pub async fn request_file_classification(
     let url = "http://localhost:11434/api/chat";
 
     // System orchestration limits enforcing exact structural boundaries
-    let system_prompt = "You are Tfatleek's backend filing clerk. Analyze the provided file metadata and text snippets. Choose a clean, descriptive snake_case folder name for 'suggested_subfolder'. If the file needs clarification, provide a human-readable clean file name string. Evaluate if the document has high semantic affinity to tax preparation or fiscal reporting (e.g., invoices, bank statements, tax returns) and set 'is_tax_relevant' accordingly. Return your answer strictly within the JSON schema constraint.";
+    let system_prompt = "You are Tfatleek's backend filing clerk. Analyze the provided file metadata and text snippets. Choose a clean, descriptive snake_case folder name for 'suggested_subfolder'. If the file needs clarification, provide a human-readable clean file name string. Evaluate if the document has high semantic affinity to tax preparation or fiscal reporting (e.g., invoices, bank statements, tax returns) and set 'is_tax_relevant' accordingly. Also check if the content mentions any family members: Tareg Mohamed Ahmed Shek (Father), Miluda Bashir Shek (Mother), Fatima Shek (Daughter), or Sama Shek (Daughter). If a clear match is found, return their full name in 'identified_member'. Return your answer strictly within the JSON schema constraint.";
 
     let user_content = format!(
         "File Name: {}\nSize: {}\nSnippet Content Preview: \n\"\"\"\n{}\n\"\"\"",
@@ -46,9 +47,10 @@ pub async fn request_file_classification(
                 "new_clean_name": { "type": "string" },
                 "confidence_score": { "type": "number" },
                 "is_tax_relevant": { "type": "boolean" },
-                "reasoning": { "type": "string" }
+                "reasoning": { "type": "string" },
+                "identified_member": { "type": ["string", "null"] }
             },
-            "required": ["suggested_subfolder", "new_clean_name", "confidence_score", "is_tax_relevant", "reasoning"]
+            "required": ["suggested_subfolder", "new_clean_name", "confidence_score", "is_tax_relevant", "reasoning", "identified_member"]
         },
         "options": {
             "temperature": 0.0,

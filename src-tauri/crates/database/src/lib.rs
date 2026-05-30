@@ -46,6 +46,7 @@ impl DbManager {
                 suggested_subfolder TEXT,
                 confidence_score REAL DEFAULT 0.0,
                 is_tax_relevant INTEGER DEFAULT 0,
+                identified_member TEXT,
                 ai_processed_at INTEGER,
                 FOREIGN KEY(file_id) REFERENCES file_index(id) ON DELETE CASCADE
             );

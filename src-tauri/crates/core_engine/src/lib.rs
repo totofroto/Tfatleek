@@ -13,6 +13,24 @@ use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyMember {
+    pub key: String,
+    pub full_name: String,
+    pub birth_date: String,
+    pub role: String,
+}
+
+// Provide the baseline default presets specified by the system owner
+pub fn get_default_family_presets() -> Vec<FamilyMember> {
+    vec![
+        FamilyMember { key: "tareg".to_string(), full_name: "Tareg Mohamed Ahmed Shek".to_string(), birth_date: "05.10.1978".to_string(), role: "Father/Owner".to_string() },
+        FamilyMember { key: "miluda".to_string(), full_name: "Miluda Bashir Shek".to_string(), birth_date: "24.08.1990".to_string(), role: "Mother".to_string() },
+        FamilyMember { key: "fatima".to_string(), full_name: "Fatima Shek".to_string(), birth_date: "12.05.2015".to_string(), role: "Daughter".to_string() },
+        FamilyMember { key: "sama".to_string(), full_name: "Sama Shek".to_string(), birth_date: "".to_string(), role: "Daughter".to_string() },
+    ]
+}
+
 pub enum CoreCategory {
     Steuererklaerung,
     MedizinischePraxis,
@@ -53,6 +71,8 @@ pub struct IngestionManifest {
     pub suggested_target_tree: String,
     #[serde(rename = "isTaxRelevant")]
     pub is_tax_relevant: bool,
+    #[serde(rename = "identifiedMember")]
+    pub identified_member: Option<String>,
 }
 
 pub fn build_rational_path(base_root: &std::path::Path, category: &str, file_date: &str) -> std::path::PathBuf {
@@ -209,21 +229,22 @@ pub async fn run_ai_classification(
     // 0. Caching Skip Guard
     let db = DbManager::init(db_path).map_err(|e| format!("DB Access Fault: {}", e))?;
     if let Ok(conn_lock) = db.conn.lock() {
-        let cached_result: Option<(String, f64, bool)> = conn_lock.query_row(
-            "SELECT suggested_subfolder, confidence_score, is_tax_relevant FROM ai_metadata 
+        let cached_result: Option<(String, f64, bool, Option<String>)> = conn_lock.query_row(
+            "SELECT suggested_subfolder, confidence_score, is_tax_relevant, identified_member FROM ai_metadata 
              JOIN file_index ON file_index.id = ai_metadata.file_id 
              WHERE file_index.file_path = ?1 AND suggested_subfolder IS NOT NULL",
             rusqlite::params![file_path],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i32>(2)? != 0))
+            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i32>(2)? != 0, row.get(3)?))
         ).ok();
 
-        if let Some((subfolder, confidence, is_tax)) = cached_result {
+        if let Some((subfolder, confidence, is_tax, member)) = cached_result {
             return Ok(AiClassificationResult {
                 suggested_subfolder: subfolder,
                 new_clean_name: path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string(),
                 confidence_score: confidence,
                 reasoning: "Active cache hit: Skipping inference".to_string(),
                 is_tax_relevant: is_tax,
+                identified_member: member,
             });
         }
     }
@@ -276,13 +297,14 @@ pub async fn run_ai_classification(
             let mut conn = conn_lock;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
-                "INSERT OR REPLACE INTO ai_metadata (file_id, extracted_text, suggested_subfolder, confidence_score, is_tax_relevant, ai_processed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO ai_metadata (file_id, extracted_text, suggested_subfolder, confidence_score, is_tax_relevant, identified_member, ai_processed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     id,
                     snippet, // Using actual snippet instead of placeholder string
                     ai_result.suggested_subfolder,
                     ai_result.confidence_score,
                     if ai_result.is_tax_relevant { 1 } else { 0 },
+                    ai_result.identified_member,
                     current_time
                 ],
             ).map_err(|e| e.to_string())?;
@@ -348,6 +370,7 @@ pub async fn process_single_dropped_file<R: tauri::Runtime>(
             detected_date: date_str.to_string(),
             suggested_target_tree: target_tree.to_string_lossy().to_string(),
             is_tax_relevant: ai_result.is_tax_relevant,
+            identified_member: ai_result.identified_member,
         };
         
         serde_json::to_string(&manifest).map_err(|e| format!("Serialization error: {}", e))
