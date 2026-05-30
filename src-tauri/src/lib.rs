@@ -17,9 +17,16 @@ async fn start_dedup_scan(handle: tauri::AppHandle, target_path: String) -> Resu
     }
     let db_path = get_db_path(&handle);
     
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    let excluded_folders = {
+        let settings = settings_mgr.current.read().unwrap();
+        settings.excluded_folders.iter().cloned().collect::<Vec<String>>()
+    };
+
     // Dispatch execution to a background thread to keep UI interaction at 60fps
     tokio::task::spawn_blocking(move || {
-        match core_engine::execute_and_store_scan(&target_path, &db_path) {
+        match core_engine::execute_and_store_scan(&target_path, &db_path, excluded_folders) {
             Ok(results) => {
                 // Return data payload serialized to JSON for React consumption
                 serde_json::to_string(&results).map_err(|e| e.to_string())
@@ -45,7 +52,14 @@ async fn classify_file_with_ai(handle: tauri::AppHandle, file_path: String) -> R
 #[tauri::command]
 async fn trigger_system_undo(handle: tauri::AppHandle) -> Result<String, String> {
     let db_path = get_db_path(&handle);
-    let fs_engine = core_engine::transactions::SafeFileSystemEngine::new(&db_path);
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    let protected_paths = {
+        let settings = settings_mgr.current.read().unwrap();
+        settings.preset_paths.values().cloned().collect::<Vec<String>>()
+    };
+    
+    let fs_engine = core_engine::transactions::SafeFileSystemEngine::new(&db_path, protected_paths);
     fs_engine.execute_undo_last_transaction()
 }
 
@@ -78,11 +92,18 @@ async fn fetch_isolated_duplicates(handle: tauri::AppHandle) -> Result<String, S
 }
 
 #[tauri::command]
-async fn execute_file_deletion(file_path: String) -> Result<String, String> {
+async fn execute_file_deletion(handle: tauri::AppHandle, file_path: String) -> Result<String, String> {
     let target_lower = file_path.to_lowercase();
     if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" {
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
+    
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    if settings_mgr.is_path_protected(&file_path) {
+        return Err(format!("Safety Lock: File deletion forbidden on protected path: {}", file_path));
+    }
+
     let path = std::path::Path::new(&file_path);
     if !path.exists() {
         return Err("Target file does not exist on storage arrays.".to_string());
@@ -92,6 +113,42 @@ async fn execute_file_deletion(file_path: String) -> Result<String, String> {
         .map_err(|e| format!("OS secure file removal failure: {}", e))?;
         
     Ok(format!("File successfully unlinked from volume path: {}", file_path))
+}
+
+#[tauri::command]
+async fn get_settings(handle: tauri::AppHandle) -> Result<core_engine::settings::AppSettings, String> {
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    let settings = settings_mgr.current.read().map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+async fn add_preset_path(handle: tauri::AppHandle, name: String, path: String) -> Result<(), String> {
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    settings_mgr.set_preset_path(name, path)
+}
+
+#[tauri::command]
+async fn add_excluded_folder(handle: tauri::AppHandle, folder: String) -> Result<(), String> {
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    settings_mgr.add_excluded_folder(folder)
+}
+
+#[tauri::command]
+async fn remove_excluded_folder(handle: tauri::AppHandle, folder: String) -> Result<(), String> {
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    settings_mgr.remove_excluded_folder(&folder)
+}
+
+#[tauri::command]
+async fn index_master_tree(target_path: String) -> Result<Vec<String>, String> {
+    let indexer = core_engine::settings::MasterTreeIndexer::new();
+    indexer.index_path(&target_path)?;
+    Ok(indexer.get_cached_structure(&target_path).unwrap_or_default())
 }
 
 #[tauri::command]
@@ -148,7 +205,12 @@ pub fn run() {
             process_single_dropped_file,
             execute_relocation_commit,
             query_contextual_memory_match,
-            get_family_presets
+            get_family_presets,
+            get_settings,
+            add_preset_path,
+            add_excluded_folder,
+            remove_excluded_folder,
+            index_master_tree
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

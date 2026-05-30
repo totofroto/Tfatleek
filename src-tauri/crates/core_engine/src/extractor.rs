@@ -18,22 +18,23 @@ pub fn extract_file_snippet<P: AsRef<Path>>(file_path: P) -> String {
     }
 }
 
-/// Native PDF content stream extractor wrapper bounded strictly at 2,048 characters
+/// Native PDF content stream extractor wrapper bounded strictly at 500KB or first 3 pages
 fn parse_pdf_document(path: &Path) -> String {
     match pdf_oxide::PdfDocument::open(path) {
         Ok(doc) => {
             let mut collected_text = String::with_capacity(2048);
             let page_count = doc.page_count().unwrap_or(0);
+            let max_pages = page_count.min(3);
             
-            for i in 0..page_count {
+            for i in 0..max_pages {
                 if let Ok(text) = doc.extract_text(i) {
                     collected_text.push_str(&text);
                     collected_text.push(' ');
                 }
-                if collected_text.len() >= 2048 { break; }
+                // Also enforce the 500kb limit (approx 500k characters for simplicity in this context)
+                if collected_text.len() >= 500_000 { break; }
             }
             
-            collected_text.truncate(2048);
             if collected_text.trim().is_empty() {
                 "Error: Document layout contains zero indexable or rendered text strings.".to_string()
             } else {
@@ -44,18 +45,20 @@ fn parse_pdf_document(path: &Path) -> String {
     }
 }
 
-/// MS Word Docx open-XML element text engine wrapper
+/// MS Word Docx open-XML element text engine wrapper bounded at 500KB
 fn parse_docx_document(path: &Path) -> String {
     match docx_lite::extract_text(path) {
         Ok(mut body_text) => {
-            body_text.truncate(2048);
+            if body_text.len() > 500_000 {
+                body_text.truncate(500_000);
+            }
             format!("[EXTRACTED WORD DOC CONTEXT]: {}", body_text.trim())
         }
         Err(_) => "[SYSTEM ERROR]: Failed to decode target MS Office open-XML file structure.".to_string(),
     }
 }
 
-/// Reads plain text files, logs, or scripts up to a strict 2,048-byte limit
+/// Reads plain text files, logs, or scripts up to a strict 500KB limit
 fn parse_plain_text(path: &Path) -> String {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -63,7 +66,7 @@ fn parse_plain_text(path: &Path) -> String {
     };
     
     let mut reader = BufReader::new(file);
-    let mut buffer = vec![0; 2048];
+    let mut buffer = vec![0; 500_000];
     
     match reader.read(&mut buffer) {
         Ok(bytes_read) => {

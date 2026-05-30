@@ -1,24 +1,70 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use database::DbManager;
 
 pub struct SafeFileSystemEngine {
     db_path: String,
+    protected_paths: Vec<String>,
 }
 
 impl SafeFileSystemEngine {
-    pub fn new(db_path: &str) -> Self {
-        Self { db_path: db_path.to_string() }
+    pub fn new(db_path: &str, protected_paths: Vec<String>) -> Self {
+        Self { 
+            db_path: db_path.to_string(),
+            protected_paths,
+        }
+    }
+
+    fn is_protected(&self, path: &Path) -> bool {
+        for protected in &self.protected_paths {
+            if path.starts_with(Path::new(protected)) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Safely executes a file displacement (Move/Rename) backed by the pre-flight safety ledger
     pub fn execute_safe_move(&self, src: &str, dest: &str) -> Result<(), String> {
         let src_path = Path::new(src);
-        let dest_path = Path::new(dest);
+        let mut dest_path = PathBuf::from(dest);
 
         if !src_path.exists() {
             return Err(format!("Source path does not exist: {}", src));
         }
+
+        // Safety Lock: Prevent any operations on protected paths that might lead to data loss
+        if self.is_protected(src_path) {
+            return Err(format!("Safety Lock: Operation forbidden on protected path: {}", src));
+        }
+
+        // Duplicate Handling Protocol
+        if dest_path.exists() {
+            let filename = dest_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            
+            let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
+            let duplicate_dir = parent.join("Duplicates_Detected");
+            
+            if !duplicate_dir.exists() {
+                fs::create_dir_all(&duplicate_dir).map_err(|e| format!("Failed to create duplicate directory: {}", e))?;
+            }
+            
+            dest_path = duplicate_dir.join(&filename);
+            
+            // If the duplicate itself exists, add a timestamp to avoid collision
+            if dest_path.exists() {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                dest_path = duplicate_dir.join(format!("{}_{}", timestamp, filename));
+            }
+        }
+
+        let final_dest = dest_path.to_string_lossy().to_string();
 
         // Create target directory tree structures if missing
         if let Some(parent) = dest_path.parent() {
@@ -39,14 +85,14 @@ impl SafeFileSystemEngine {
 
             conn_lock.execute(
                 "INSERT INTO transaction_log (operation_type, source_path, destination_path, timestamp, status) VALUES ('MOVE', ?1, ?2, ?3, 'PENDING')",
-                rusqlite::params![src, dest, current_time],
+                rusqlite::params![src, final_dest, current_time],
             ).map_err(|e| format!("Pre-flight safety ledger write aborted: {}", e))?;
             
             tx_id = conn_lock.last_insert_rowid();
         }
 
         // Phase 2: Native OS File Manipulation
-        match fs::rename(src_path, dest_path) {
+        match fs::rename(src_path, &dest_path) {
             Ok(_) => {
                 // Commit complete status
                 if let Ok(conn_lock) = db.conn.lock() {
@@ -58,7 +104,7 @@ impl SafeFileSystemEngine {
                     let _ = conn_lock.execute(
                         "UPDATE file_index SET file_path = ?, file_name = ? WHERE file_path = ?",
                         rusqlite::params![
-                            dest, 
+                            final_dest, 
                             dest_path.file_name().and_then(|n| n.to_str()).unwrap_or(""), 
                             src
                         ],

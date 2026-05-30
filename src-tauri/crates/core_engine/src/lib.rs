@@ -2,6 +2,7 @@ pub mod extractor;
 pub mod transactions;
 pub mod nas_bridge;
 pub mod sftp_bridge;
+pub mod settings;
 pub use crypto_dedup::{run_dedup_scan, ScanResult};
 use database::{DbManager, FileRecord};
 use local_ai::{request_file_classification, FileMetadataPayload, AiClassificationResult};
@@ -9,6 +10,7 @@ use std::path::Path;
 use tauri::{Emitter, Manager};
 use serde::{Serialize, Deserialize};
 use crate::transactions::SafeFileSystemEngine;
+use crate::settings::SettingsManager;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -101,6 +103,17 @@ pub async fn execute_batch_organization<R: tauri::Runtime>(
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
 
+    let config_dir = app.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = SettingsManager::new(&config_dir);
+    let protected_paths = {
+        let settings = settings_mgr.current.read().unwrap();
+        settings.preset_paths.values().cloned().collect::<Vec<String>>()
+    };
+    let excluded_folders = {
+        let settings = settings_mgr.current.read().unwrap();
+        settings.excluded_folders.clone()
+    };
+
     let db = DbManager::init(db_path).map_err(|e| e.to_string())?;
     
     // 1. Gather all file rows currently indexed in our SQLite database
@@ -110,7 +123,11 @@ pub async fn execute_batch_organization<R: tauri::Runtime>(
         let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
         for row in rows {
             if let Ok(file_path) = row {
-                files_to_process.push(file_path);
+                // Filter out excluded folders
+                let is_excluded = excluded_folders.iter().any(|ex| file_path.contains(ex));
+                if !is_excluded {
+                    files_to_process.push(file_path);
+                }
             }
         }
     }
@@ -130,7 +147,8 @@ pub async fn execute_batch_organization<R: tauri::Runtime>(
             let db_path = db_path.to_string();
             let model_name = model_name.to_string();
             let completed_count = completed_count.clone();
-            let fs_engine = SafeFileSystemEngine::new(&db_path);
+            let protected_paths = protected_paths.clone();
+            let fs_engine = SafeFileSystemEngine::new(&db_path, protected_paths);
 
             async move {
                 let path = std::path::Path::new(&file_path);
@@ -189,7 +207,7 @@ pub async fn execute_batch_organization<R: tauri::Runtime>(
     Ok(format!("Successfully categorized and realigned {} workspace files.", total_files))
 }
 
-pub fn execute_and_store_scan(root_path: &str, db_path: &str) -> Result<Vec<ScanResult>, String> {
+pub fn execute_and_store_scan(root_path: &str, db_path: &str, excluded_folders: Vec<String>) -> Result<Vec<ScanResult>, String> {
     // 1. Initialize the Database Manager
     let db = DbManager::init(db_path).map_err(|e| format!("DB Init Error: {}", e))?;
     
@@ -197,7 +215,14 @@ pub fn execute_and_store_scan(root_path: &str, db_path: &str) -> Result<Vec<Scan
     let scan_results = run_dedup_scan(root_path);
     
     // 3. Stream results into SQLite state management
-    for file in &scan_results {
+    let mut filtered_results = Vec::new();
+    for file in scan_results {
+        // Filter out excluded folders
+        let is_excluded = excluded_folders.iter().any(|ex| file.file_path.contains(ex));
+        if is_excluded {
+            continue;
+        }
+
         // Map crypto ScanResult to database structure
         let record = FileRecord {
             id: None,
@@ -211,9 +236,10 @@ pub fn execute_and_store_scan(root_path: &str, db_path: &str) -> Result<Vec<Scan
         };
         
         let _ = db.upsert_file(&record);
+        filtered_results.push(file);
     }
     
-    Ok(scan_results)
+    Ok(filtered_results)
 }
 
 pub async fn run_ai_classification(
@@ -380,7 +406,7 @@ pub async fn process_single_dropped_file<R: tauri::Runtime>(
 }
 
 pub async fn execute_relocation_commit<R: tauri::Runtime>(
-    _app: tauri::AppHandle<R>,
+    app: tauri::AppHandle<R>,
     original_path: String,
     suggested_name: String,
     identified_category: String,
@@ -389,7 +415,14 @@ pub async fn execute_relocation_commit<R: tauri::Runtime>(
     is_tax_relevant: bool,
     db_path: String,
 ) -> Result<String, String> {
-    let fs_engine = SafeFileSystemEngine::new(&db_path);
+    let config_dir = app.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = SettingsManager::new(&config_dir);
+    let protected_paths = {
+        let settings = settings_mgr.current.read().unwrap();
+        settings.preset_paths.values().cloned().collect::<Vec<String>>()
+    };
+
+    let fs_engine = SafeFileSystemEngine::new(&db_path, protected_paths);
     let original_path_obj = Path::new(&original_path);
     
     // Choose base root based on storage tier
