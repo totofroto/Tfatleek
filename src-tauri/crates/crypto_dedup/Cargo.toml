@@ -1,0 +1,10 @@
+[package]
+name = "crypto_dedup"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = "1.5"
+rayon = "1.10"
+walkdir = "2.5"
+serde = { version = "1", features = ["derive"] }
