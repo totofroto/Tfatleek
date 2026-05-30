@@ -1,3 +1,6 @@
+> 🤖 **AI Developer Handover Prompt:**
+> "Read `HANDOVER_MANIFEST.md` at my project root to understand exactly how the app works, what the non-negotiable safety rules are, and what active tasks we need to build next."
+
 # Tauri + React + Typescript
 
 This template should help get you started developing with Tauri, React and Typescript in Vite.
