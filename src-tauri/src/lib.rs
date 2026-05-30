@@ -41,7 +41,7 @@ async fn classify_file_with_ai(handle: tauri::AppHandle, file_path: String) -> R
     let db_path = get_db_path(&handle);
     let model_target = "gemma4:e4b"; // Pinning optimized model size for 16GB systems
 
-    match core_engine::run_ai_classification(&file_path, &db_path, model_target).await {
+    match core_engine::run_ai_classification(&file_path, &db_path, model_target, core_engine::IngestionContext::Private).await {
         Ok(result) => {
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
@@ -152,10 +152,10 @@ async fn index_master_tree(target_path: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn process_single_dropped_file(handle: tauri::AppHandle, path: String) -> Result<String, String> {
+async fn process_single_dropped_file(handle: tauri::AppHandle, path: String, context: core_engine::IngestionContext) -> Result<String, String> {
     let db_path = get_db_path(&handle);
     let model_target = "gemma4:e4b";
-    core_engine::process_single_dropped_file(handle, &path, &db_path, model_target).await
+    core_engine::process_single_dropped_file(handle, &path, &db_path, model_target, context).await
 }
 
 #[tauri::command]
@@ -191,6 +191,41 @@ fn get_family_presets() -> Vec<core_engine::FamilyMember> {
     core_engine::get_default_family_presets()
 }
 
+#[tauri::command]
+async fn submit_to_paperless_vault(
+    handle: tauri::AppHandle,
+    file_path: String,
+    context: core_engine::IngestionContext,
+) -> Result<(), String> {
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    let settings = settings_mgr.current.read().map_err(|e| e.to_string())?.clone();
+    let db_path = get_db_path(&handle);
+    
+    core_engine::paperless_bridge::upload_to_paperless(
+        std::path::PathBuf::from(file_path),
+        context,
+        settings,
+        db_path
+    ).await
+}
+
+#[tauri::command]
+async fn update_paperless_settings(
+    handle: tauri::AppHandle,
+    nas_ip: String,
+    api_token: String,
+) -> Result<(), String> {
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    {
+        let mut settings = settings_mgr.current.write().map_err(|e| e.to_string())?;
+        settings.paperless_nas_ip = nas_ip;
+        settings.paperless_api_token = api_token;
+    }
+    settings_mgr.save()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -210,7 +245,9 @@ pub fn run() {
             add_preset_path,
             add_excluded_folder,
             remove_excluded_folder,
-            index_master_tree
+            index_master_tree,
+            submit_to_paperless_vault,
+            update_paperless_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -9,12 +9,13 @@ database = { path = "../database" }
 local_ai = { path = "../local_ai" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 futures = "0.3"
-ssh2 = "0.9"
+reqwest = { version = "0.12", features = ["multipart", "json"] }
 tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pdf_oxide = "0.3"
 docx-lite = "0.2"
+tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
 tauri-build = { version = "2" }

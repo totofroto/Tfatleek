@@ -8,6 +8,8 @@ use std::sync::{Arc, RwLock};
 pub struct AppSettings {
     pub preset_paths: HashMap<String, String>,
     pub excluded_folders: HashSet<String>,
+    pub paperless_nas_ip: String,
+    pub paperless_api_token: String,
 }
 
 pub struct SettingsManager {

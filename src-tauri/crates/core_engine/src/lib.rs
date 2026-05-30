@@ -1,7 +1,6 @@
 pub mod extractor;
 pub mod transactions;
-pub mod nas_bridge;
-pub mod sftp_bridge;
+pub mod paperless_bridge;
 pub mod settings;
 pub use crypto_dedup::{run_dedup_scan, ScanResult};
 use database::{DbManager, FileRecord};
@@ -57,6 +56,14 @@ pub struct ProgressPayload {
     pub total: usize,
     pub percentage: f32,
     pub current_file: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum IngestionContext {
+    #[serde(rename = "PRIVATE")]
+    Private,
+    #[serde(rename = "OTHERS")]
+    Others,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,7 +170,7 @@ pub async fn execute_batch_organization<R: tauri::Runtime>(
                 let result = if !approved_white_list.contains(&ext.as_str()) {
                     Err("SKIPPED_BY_WHITELIST".to_string())
                 } else {
-                    run_ai_classification(&file_path, &db_path, &model_name).await
+                    run_ai_classification(&file_path, &db_path, &model_name, IngestionContext::Private).await
                 };
                 
                 let current = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -246,6 +253,7 @@ pub async fn run_ai_classification(
     file_path: &str,
     db_path: &str,
     model_name: &str,
+    context: IngestionContext,
 ) -> Result<AiClassificationResult, String> {
     let path = Path::new(file_path);
     if !path.exists() {
@@ -287,7 +295,11 @@ pub async fn run_ai_classification(
     let file_size_formatted = format!("{:.2} KB", (file_size as f64) / 1024.0);
 
     // 2. Extract safe text snippet via our Module 2B native extractor stream
-    let snippet = extractor::extract_file_snippet(file_path);
+    // Apply head-only parsing logic for OTHERS context
+    let mut snippet = extractor::extract_file_snippet(file_path);
+    if context == IngestionContext::Others && snippet.len() > 2000 {
+        snippet.truncate(2000); // Strict head-only limit for RAD/Medical
+    }
 
     if snippet.is_empty() || snippet.starts_with("Error:") || snippet.starts_with("[SYSTEM ERROR]:") {
         return Err("No valid document text found for classification.".to_string());
@@ -301,7 +313,13 @@ pub async fn run_ai_classification(
     };
 
     // 4. Dispatch payload to local Gemma 4 instance over network interface
-    let ai_result = request_file_classification(payload, model_name).await?;
+    let mut ai_result = request_file_classification(payload, model_name).await?;
+
+    // Override for OTHERS context to route to specialized NAS folders
+    if context == IngestionContext::Others {
+        ai_result.suggested_subfolder = "Medical_RAD_Ingestion".to_string();
+        ai_result.is_tax_relevant = false;
+    }
 
     // 5. Safely register classification result to permanent SQLite store
     let db = DbManager::init(db_path).map_err(|e| format!("DB Access Fault: {}", e))?;
@@ -345,7 +363,8 @@ pub async fn process_single_dropped_file<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     file_path: &str,
     db_path: &str,
-    model_name: &str
+    model_name: &str,
+    context: IngestionContext,
 ) -> Result<String, String> {
     let path = Path::new(file_path);
     if !path.exists() {
@@ -379,7 +398,7 @@ pub async fn process_single_dropped_file<R: tauri::Runtime>(
     let _ = db.upsert_file(&record);
 
     // 2. Trigger immediate classification
-    let ai_result = run_ai_classification(file_path, db_path, model_name).await?;
+    let ai_result = run_ai_classification(file_path, db_path, model_name, context).await?;
 
     // 3. Automated routing if confidence meets the threshold
     if ai_result.confidence_score >= 0.5 {
@@ -404,6 +423,7 @@ pub async fn process_single_dropped_file<R: tauri::Runtime>(
         Err(format!("Confidence Score ({:.2}) too low for automated routing. Reasoning: {}", ai_result.confidence_score, ai_result.reasoning))
     }
 }
+
 
 pub async fn execute_relocation_commit<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

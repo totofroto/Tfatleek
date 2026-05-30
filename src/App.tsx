@@ -43,43 +43,66 @@ interface FamilyMember {
   role: string;
 }
 
+interface AppSettings {
+  preset_paths: Record<string, string>;
+  excluded_folders: string[];
+  paperless_nas_ip: string;
+  paperless_api_token: string;
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings'>('dashboard');
-  const [excludedExtensions, setExcludedExtensions] = useState<string[]>(['srt', 'vtt', 'pyc', 'jsn', 'gz', 'html', 'png', 'jpg', 'gif']);
+  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [shortcuts, setShortcuts] = useState<string[]>(['EXCLUSION SETTINGS']);
+  const [ingestionContext, setIngestionContext] = useState<'PRIVATE' | 'OTHERS'>('PRIVATE');
+  
   const [targetPath, setTargetPath] = useState("");
   const [status, setStatus] = useState<"idle" | "scanning" | "success" | "error" | "batching">("idle");
   const [results, setResults] = useState<ScanResult[]>([]);
-  const [showDuplicatesOnly, setShowDuplicatesOnly] = useState(false);
-  const [duplicateGroups, setDuplicateGroups] = useState<any[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   
   const [selectedFile, setSelectedFile] = useState<ScanResult | null>(null);
   const [aiResult, setAiResult] = useState<AiClassificationResult | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
-  const [undoStatus, setUndoStatus] = useState<string | null>(null);
   const [batchProgress, setBatchProgress] = useState<ProgressPayload | null>(null);
-  const [newExtension, setNewExtension] = useState("");
 
   const [isDragging, setIsDragging] = useState(false);
   const [droppedFileLog, setDroppedFileLog] = useState<string | null>(null);
-  const [smartCorrectionAlert, setSmartCorrectionAlert] = useState<string | null>(null);
 
   const [pendingManifest, setPendingManifest] = useState<IngestionManifest | null>(null);
-  const [selectedStorageTier, setSelectedStorageTier] = useState<"LOCAL" | "NAS">("LOCAL");
+  const [selectedStorageTier, setSelectedStorageTier] = useState<"LOCAL" | "NAS" | "PAPERLESS">("LOCAL");
 
   const [familyRegistry, setFamilyRegistry] = useState<FamilyMember[]>([]);
-  const [editableTreePath, setEditableTreePath] = useState<string>("");
+
+  // Settings State
+  const [appSettings, setAppSettings] = useState<AppSettings>({
+    preset_paths: {},
+    excluded_folders: [],
+    paperless_nas_ip: "",
+    paperless_api_token: ""
+  });
+  const [newExclusion, setNewExclusion] = useState("");
+
+  const availableShortcuts = [
+    { id: 'EXCLUSION SETTINGS', label: 'Exclusion Settings' },
+    { id: 'FAMILY PRESETS', label: 'Family Presets' },
+    { id: 'PATH MAPPINGS', label: 'Path Mappings' },
+    { id: 'PAPERLESS CONFIG', label: 'Paperless Config' },
+  ];
 
   useEffect(() => {
-    const fetchPresets = async () => {
+    const init = async () => {
       try {
-        const presets = await invoke<FamilyMember[]>("get_family_presets");
+        const [presets, settings] = await Promise.all([
+          invoke<FamilyMember[]>("get_family_presets"),
+          invoke<AppSettings>("get_settings")
+        ]);
         setFamilyRegistry(presets);
+        setAppSettings(settings);
       } catch (error) {
-        console.error("Failed to load family presets:", error);
+        console.error("Initialization Error:", error);
       }
     };
-    fetchPresets();
+    init();
   }, []);
 
   useEffect(() => {
@@ -90,21 +113,9 @@ export default function App() {
         setIsDragging(false);
       } else if (event.payload.type === 'drop') {
         setIsDragging(false);
-        
-        // Grab the absolute OS file path of the dropped item
         const droppedPaths = event.payload.paths;
         if (droppedPaths.length > 0) {
-          const targetPath = droppedPaths[0];
-          
-          // Enforce our non-negotiable desktop safety check
-          const lowerPath = targetPath.toLowerCase();
-          if (lowerPath === "/users/taregahmed/desktop" || lowerPath === "/users/taregahmed/documents") {
-            alert("Safety Guardrail: Cannot drop direct root directories. Please drop specific files or subfolders.");
-            return;
-          }
-
-          // Trigger immediate Paperless-style ingestion processing
-          handleDroppedIngestion(targetPath);
+          handleDroppedIngestion(droppedPaths[0]);
         }
       }
     });
@@ -112,62 +123,54 @@ export default function App() {
     return () => {
       unlistenFileDrop.then((unlisten) => unlisten());
     };
-  }, []);
+  }, [ingestionContext]);
 
   useEffect(() => {
     const unlistenPromise = listen<ProgressPayload>("scan-progress", (event) => {
       setBatchProgress(event.payload);
     });
-
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
 
   const handleDroppedIngestion = async (filePath: string) => {
-    // Extract just the file name for the loading text
     const fileName = filePath.split('/').pop() || filePath;
-    setDroppedFileLog(`Analyzing: ${fileName}...`);
-    setSmartCorrectionAlert(null);
+    setDroppedFileLog(`Analyzing [${ingestionContext}]: ${fileName}...`);
     
     try {
-      // When a path is analyzed via handleDroppedIngestion:
-      const memoryRecommendation = await invoke<string | null>("query_contextual_memory_match", { incomingPath: filePath });
-      if (memoryRecommendation) {
-        setSmartCorrectionAlert(`💡 Optimization Notice: I remember you usually save these files in your NAS or subfolder cluster. Let's correct its path assignment.`);
-      }
-
-      // Call the optimized backend module to classify the file
-      const resultJson = await invoke<string>("process_single_dropped_file", { path: filePath });
+      const resultJson = await invoke<string>("process_single_dropped_file", { path: filePath, context: ingestionContext });
       const manifest: IngestionManifest = JSON.parse(resultJson);
-      
       setPendingManifest(manifest);
       setDroppedFileLog(`✓ Analysis Complete: ${fileName}`);
     } catch (error) {
-      setDroppedFileLog(`❌ Error routing file: ${error}`);
+      setDroppedFileLog(`❌ Error: ${error}`);
     }
   };
 
   const handleExecuteFinalCommit = async () => {
     if (!pendingManifest) return;
-
     try {
-      const result = await invoke<string>("execute_relocation_commit", {
-        originalPath: pendingManifest.originalPath,
-        suggestedName: pendingManifest.suggestedName,
-        identifiedCategory: pendingManifest.identifiedCategory,
-        detectedDate: pendingManifest.detectedDate,
-        storageTier: selectedStorageTier,
-        isTaxRelevant: pendingManifest.isTaxRelevant
-      });
-      
-      setDroppedFileLog(`✓ ${result}`);
-      setPendingManifest(null);
-      
-      // Refresh results if we are on dashboard
-      if (activeTab === 'dashboard' && status === 'success') {
-        handleScan();
+      if (selectedStorageTier === "PAPERLESS") {
+        setDroppedFileLog(`🚀 Transmitting to Paperless Vault...`);
+        await invoke("submit_to_paperless_vault", {
+          filePath: pendingManifest.originalPath,
+          context: ingestionContext
+        });
+        setDroppedFileLog(`✓ Successfully vaulted in Paperless.`);
+      } else {
+        const result = await invoke<string>("execute_relocation_commit", {
+          originalPath: pendingManifest.originalPath,
+          suggestedName: pendingManifest.suggestedName,
+          identifiedCategory: pendingManifest.identifiedCategory,
+          detectedDate: pendingManifest.detectedDate,
+          storageTier: selectedStorageTier,
+          isTaxRelevant: pendingManifest.isTaxRelevant
+        });
+        setDroppedFileLog(`✓ ${result}`);
       }
+      setPendingManifest(null);
+      if (activeTab === 'dashboard' && status === 'success') handleScan();
     } catch (error) {
       setErrorMessage(`Commit Error: ${error}`);
       setPendingManifest(null);
@@ -175,23 +178,14 @@ export default function App() {
   };
 
   const handleScan = async () => {
-    if (!targetPath.trim()) {
-      setErrorMessage("Please enter a valid directory path.");
-      setStatus("error");
-      return;
-    }
-
+    if (!targetPath.trim()) return;
     setStatus("scanning");
     setErrorMessage("");
     setSelectedFile(null);
     setAiResult(null);
-
     try {
-      // Invoke our background tokio worker via Tauri IPC
       const rawJsonResponse = await invoke<string>("start_dedup_scan", { targetPath });
-      const parsedResults: ScanResult[] = JSON.parse(rawJsonResponse);
-      
-      setResults(parsedResults);
+      setResults(JSON.parse(rawJsonResponse));
       setStatus("success");
     } catch (error) {
       setErrorMessage(String(error));
@@ -201,14 +195,13 @@ export default function App() {
 
   const handleAiAnalyze = async () => {
     if (!selectedFile) return;
-
     setIsAiLoading(true);
     setAiResult(null);
     try {
       const response = await invoke<string>("classify_file_with_ai", { filePath: selectedFile.file_path });
       setAiResult(JSON.parse(response));
     } catch (error) {
-      setErrorMessage(`AI Orchestration Error: ${error}`);
+      setErrorMessage(`AI Error: ${error}`);
     } finally {
       setIsAiLoading(false);
     }
@@ -216,18 +209,10 @@ export default function App() {
 
   const handleBatchOrganize = async () => {
     if (!targetPath.trim()) return;
-    
     setStatus("batching");
-    setBatchProgress(null);
-    
     try {
-      const result = await invoke<string>("trigger_batch_ai_organization", { 
-        targetPath,
-        customExcludes: excludedExtensions
-      });
-      console.log(result);
+      await invoke("trigger_batch_ai_organization", { targetPath, customExcludes: [] });
       setStatus("success");
-      // Re-scan to update the UI with new locations
       handleScan();
     } catch (error) {
       setErrorMessage(`Batch Error: ${error}`);
@@ -235,58 +220,38 @@ export default function App() {
     }
   };
 
-  const handleUndo = async () => {
+  const savePaperlessConfig = async () => {
     try {
-      const result = await invoke<string>("trigger_system_undo");
-      setUndoStatus(result);
-      // Clear status after 5 seconds
-      setTimeout(() => setUndoStatus(null), 5000);
-      // Re-scan to update the UI
-      if (status === "success") handleScan();
+      await invoke("update_paperless_settings", {
+        nasIp: appSettings.paperless_nas_ip,
+        api_token: appSettings.paperless_api_token
+      });
+      alert("Settings Secured.");
     } catch (error) {
-      setErrorMessage(`Undo Error: ${error}`);
+      alert(`Save Failed: ${error}`);
     }
   };
 
-  const fetchIsolatedDuplicates = async () => {
+  const addExclusion = async () => {
+    if (!newExclusion) return;
     try {
-      const response = await invoke<string>("fetch_isolated_duplicates");
-      const rawGroups: [string, number, string][] = JSON.parse(response);
-      
-      const transformedGroups = rawGroups.map(([hash, size, pathsStr]) => ({
-        hash,
-        fileSize: formatBytes(size),
-        paths: pathsStr.split('|').map(path => ({
-          path,
-          name: path.split('/').pop() || path
-        }))
-      }));
-
-      setDuplicateGroups(transformedGroups);
-      setShowDuplicatesOnly(true);
+      await invoke("add_excluded_folder", { folder: newExclusion });
+      setAppSettings({ ...appSettings, excluded_folders: [...appSettings.excluded_folders, newExclusion] });
+      setNewExclusion("");
     } catch (error) {
-      setErrorMessage(`Fetch Duplicates Error: ${error}`);
+      alert(error);
     }
   };
 
-  const handleDeleteClick = async (filePath: string) => {
-    if (!confirm(`Are you sure you want to permanently delete this file?\n${filePath}`)) return;
-    
+  const removeExclusion = async (folder: string) => {
     try {
-      const result = await invoke<string>("execute_file_deletion", { filePath });
-      console.log(result);
-      // Refresh views
-      if (showDuplicatesOnly) {
-        fetchIsolatedDuplicates();
-      } else {
-        handleScan();
-      }
+      await invoke("remove_excluded_folder", { folder });
+      setAppSettings({ ...appSettings, excluded_folders: appSettings.excluded_folders.filter(f => f !== folder) });
     } catch (error) {
-      setErrorMessage(`Deletion Error: ${error}`);
+      alert(error);
     }
   };
 
-  // Helper utility to format byte arrays to human-readable strings
   const formatBytes = (bytes: number): string => {
     if (bytes === 0) return "0 Bytes";
     const k = 1024;
@@ -295,507 +260,338 @@ export default function App() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
+  const toggleShortcut = (id: string) => {
+    if (shortcuts.includes(id)) {
+      setShortcuts(shortcuts.filter(s => s !== id));
+      if (activeTab === id) setActiveTab('settings');
+    } else {
+      setShortcuts([...shortcuts, id]);
+    }
+  };
+
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100 p-8 font-sans">
+    <main className="min-h-screen bg-neutral-950 text-neutral-100 p-8 font-sans selection:bg-blue-500/30">
+      {/* Ingestion Manifest Modal */}
       {pendingManifest && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-6 max-w-xl w-full shadow-2xl font-mono">
-            <div className="text-sm font-bold text-emerald-400 border-b border-neutral-950 pb-3 mb-4 uppercase tracking-wider">
-              🔎 Ingestion Gatekeeper Manifest Verification
-            </div>
-            
-            <div className="space-y-4 text-xs">
-              {pendingManifest.identifiedMember && (
-                <div className="p-3 bg-blue-950/30 border border-blue-900/50 rounded-lg animate-fade-in mb-2">
-                  <div className="flex items-center gap-2 text-blue-400 font-bold mb-1">
-                    <span>👤 Identity Match Detected</span>
-                  </div>
-                  <p className="text-neutral-300 text-[11px]">
-                    I found context matching <span className="text-blue-400 font-bold">"{pendingManifest.identifiedMember}"</span>. Should I route this to their personalized folder inside <span className="text-emerald-400">{pendingManifest.identifiedCategory}/{pendingManifest.detectedDate.replace(/-/g, '/')}</span>?
-                  </p>
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 max-w-2xl w-full shadow-[0_0_50px_-12px_rgba(0,0,0,0.5)]">
+            <h2 className="text-lg font-bold text-blue-400 mb-6 flex items-center gap-2">
+              <span className="animate-pulse">⚡</span> Manifest Verification
+            </h2>
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 gap-4 text-xs font-mono">
+                <div className="bg-black/40 p-3 rounded-lg border border-neutral-800">
+                  <span className="text-neutral-500 block mb-1 uppercase">Identified Category</span>
+                  <span className="text-emerald-400 font-bold">{pendingManifest.identifiedCategory}</span>
                 </div>
-              )}
-
-              <div>
-                <span className="text-neutral-500 block mb-1">IDENTIFIED FILE TYPE / TARGET:</span>
-                <span className="bg-neutral-900 border border-neutral-800 px-2 py-1 rounded text-neutral-200 uppercase font-bold">
-                  📁 {pendingManifest.identifiedCategory}
-                </span>
+                <div className="bg-black/40 p-3 rounded-lg border border-neutral-800">
+                  <span className="text-neutral-500 block mb-1 uppercase">Detected Date</span>
+                  <span className="text-blue-400 font-bold">{pendingManifest.detectedDate}</span>
+                </div>
               </div>
-
               <div>
-                <span className="text-neutral-500 block mb-1">PROPOSED OPTIMIZED FILENAME:</span>
+                <label className="text-[10px] text-neutral-500 uppercase font-bold mb-1 block">Optimized Name</label>
                 <input 
                   type="text" 
                   value={pendingManifest.suggestedName}
                   onChange={(e) => setPendingManifest({...pendingManifest, suggestedName: e.target.value})}
-                  className="w-full bg-black border border-neutral-800 px-3 py-2 rounded text-amber-400 focus:border-amber-500 outline-none"
+                  className="w-full bg-black border border-neutral-800 px-4 py-3 rounded-xl text-amber-400 focus:border-amber-500 outline-none font-mono text-sm"
                 />
               </div>
-
               <div>
-                <span className="text-neutral-500 block mb-1">CHOOSE STORAGE TARGET TIER:</span>
-                <div className="grid grid-cols-2 gap-3">
-                  <button 
-                    onClick={() => setSelectedStorageTier("LOCAL")}
-                    className={`py-2 rounded border font-bold transition-all ${selectedStorageTier === "LOCAL" ? "bg-emerald-950 text-emerald-400 border-emerald-600" : "bg-black text-neutral-500 border-neutral-900"}`}
-                  >
-                    💻 LOCAL MAC SSD
-                  </button>
-                  <button 
-                    onClick={() => setSelectedStorageTier("NAS")}
-                    className={`py-2 rounded border font-bold transition-all ${selectedStorageTier === "NAS" ? "bg-blue-950 text-blue-400 border-blue-600" : "bg-black text-neutral-500 border-neutral-900"}`}
-                  >
-                    🖥️ ASUSTOR NAS OVER SFTP
-                  </button>
+                <label className="text-[10px] text-neutral-500 uppercase font-bold mb-3 block">Storage Destination</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {(["LOCAL", "NAS", "PAPERLESS"] as const).map(tier => (
+                    <button 
+                      key={tier}
+                      onClick={() => setSelectedStorageTier(tier)}
+                      className={`py-3 rounded-xl border text-[10px] font-black transition-all ${selectedStorageTier === tier ? 'bg-blue-600 border-blue-400 text-white' : 'bg-black border-neutral-800 text-neutral-500'}`}
+                    >
+                      {tier === "LOCAL" ? "💻 LOCAL" : tier === "NAS" ? "🖥️ NAS" : "🗄️ PAPERLESS"}
+                    </button>
+                  ))}
                 </div>
               </div>
-
-              {pendingManifest.isTaxRelevant && (
-                <div className="mt-2 p-2 bg-amber-950/40 border border-amber-900/60 rounded-md text-[11px] font-mono text-amber-400 flex items-center justify-between">
-                  <span>💼 Automatische Steuererklaerung-Kopie</span>
-                  <span className="text-[9px] bg-amber-900 text-amber-200 px-1.5 py-0.5 rounded uppercase font-bold">DUAL ROUTING ACTIVE</span>
-                </div>
-              )}
             </div>
-
-            <div className="mt-6 pt-4 border-t border-neutral-900 flex justify-end space-x-3">
-              <button 
-                onClick={() => setPendingManifest(null)}
-                className="px-4 py-2 bg-neutral-900 hover:bg-neutral-850 text-neutral-400 text-xs rounded transition-all uppercase"
-              >
-                Cancel Ingestion
-              </button>
-              <button 
-                onClick={handleExecuteFinalCommit}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-black text-xs font-bold rounded transition-all uppercase shadow-lg shadow-emerald-950/40"
-              >
-                Confirm & Execute Relocation ⚡
-              </button>
+            <div className="mt-8 flex justify-end gap-3">
+              <button onClick={() => setPendingManifest(null)} className="px-6 py-2.5 text-neutral-500 text-xs font-bold uppercase">Discard</button>
+              <button onClick={handleExecuteFinalCommit} className="px-8 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-blue-900/20">Execute Relocation</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Header Profile Section */}
-      <header className="mb-12 border-b border-neutral-900 pb-6 max-w-6xl mx-auto flex justify-between items-end">
-        <div>
-          <h1 className="text-3xl font-light tracking-widest uppercase">
-            Tfatleek <span className="text-blue-500 font-medium">v0.1.0</span>
+      {/* Top Navigation */}
+      <header className="max-w-6xl mx-auto mb-12">
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-2xl font-black tracking-tighter uppercase italic">
+            Tfatleek <span className="text-blue-600 text-sm not-italic ml-1 opacity-50">PRO</span>
           </h1>
-          <div className="flex gap-6 mt-4">
-            <button 
-              onClick={() => setActiveTab('dashboard')}
-              className={`text-xs font-mono uppercase tracking-widest pb-1 border-b-2 transition-all ${activeTab === 'dashboard' ? 'text-blue-500 border-blue-500' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-            >
-              Dashboard
-            </button>
-            <button 
-              onClick={() => setActiveTab('settings')}
-              className={`text-xs font-mono uppercase tracking-widest pb-1 border-b-2 transition-all ${activeTab === 'settings' ? 'text-blue-500 border-blue-500' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-            >
-              Exclusion Settings
-            </button>
-          </div>
-          <p className="mt-4 text-neutral-500 font-mono text-xs">// Local Storage & NAS Deduplication Architecture</p>
-        </div>
-        <div className="flex items-center gap-4">
-          {undoStatus && (
-            <span className="text-emerald-400 font-mono text-xs animate-pulse">
-              [UNDO]: {undoStatus}
-            </span>
-          )}
-          <button 
-            onClick={handleUndo}
-            className="text-xs font-mono text-neutral-400 bg-neutral-900 hover:bg-neutral-800 px-3 py-1 rounded border border-neutral-800 transition-colors cursor-pointer"
-          >
-            Undo Last Action
-          </button>
-          <div className="font-mono text-xs text-neutral-400 bg-neutral-900 px-3 py-1 rounded border border-neutral-800">
-            Hardware: Apple Silicon M1 Pro Profile
+          <div className="flex items-center gap-3">
+             <div className="bg-neutral-900 px-4 py-1.5 rounded-full border border-neutral-800 text-[10px] font-mono text-neutral-400">
+               OS: Darwin/M1 Pro
+             </div>
+             <button onClick={() => invoke("trigger_system_undo")} className="bg-emerald-600/10 text-emerald-500 border border-emerald-500/20 px-4 py-1.5 rounded-full text-[10px] font-bold hover:bg-emerald-600/20 transition-all">
+               UNDO
+             </button>
           </div>
         </div>
+        <nav className="flex items-center gap-6 border-b border-neutral-900 pb-1">
+          <button onClick={() => setActiveTab('dashboard')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'dashboard' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Dashboard</button>
+          <button onClick={() => setActiveTab('settings')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'settings' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Settings</button>
+          <div className="h-4 w-px bg-neutral-800 mx-2 mb-3"></div>
+          {shortcuts.map(id => (
+            <div key={id} className="flex items-center gap-1 group pb-3">
+              <button onClick={() => setActiveTab(id)} className={`text-[10px] font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === id ? 'text-emerald-500 border-emerald-500' : 'text-neutral-600 border-transparent hover:text-neutral-400'}`}>
+                {availableShortcuts.find(s => s.id === id)?.label || id}
+              </button>
+              <button onClick={() => toggleShortcut(id)} className="text-[10px] text-neutral-800 hover:text-red-500 mb-1">✕</button>
+            </div>
+          ))}
+          <button onClick={() => setActiveTab('settings')} className="pb-3 text-[10px] font-black text-neutral-700 hover:text-blue-500 mb-1 transition-colors">[+] PIN SHORTCUT</button>
+        </nav>
       </header>
 
-      <div className="max-w-[1400px] mx-auto">
-        {activeTab === 'dashboard' ? (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            {/* LEFT SIDE: INGESTION GATEWAY (Cols 7) */}
-            <div className="lg:col-span-7 space-y-8">
-              {/* Native OS Drag & Drop Ingestion Panel */}
-              <div className={`mt-4 border-2 border-dashed rounded-xl p-8 transition-all duration-200 text-center flex flex-col items-center justify-center ${
-                isDragging 
-                  ? 'border-blue-500 bg-blue-950/20 text-blue-400 scale-[1.01]' 
-                  : 'border-neutral-800 bg-neutral-950/40 text-neutral-400 hover:border-neutral-700'
-              }`}>
-                <div className="text-3xl mb-2">📥</div>
-                <div className="font-mono text-xs uppercase tracking-wider font-bold">
-                  Paperless Ingestion Gateway
-                </div>
-                <div className="text-[11px] font-mono text-neutral-500 mt-1">
-                  Drag & Drop any PDF, Word Document, or Medical DICOM file directly here to route instantly
-                </div>
-                
-                {droppedFileLog && (
-                  <div className="mt-3 px-3 py-1 bg-black border border-neutral-900 rounded text-[10px] font-mono text-amber-400 animate-pulse">
-                    ⚡ Status: {droppedFileLog}
-                  </div>
-                )}
-
-                {smartCorrectionAlert && (
-                  <div className="mt-3 p-3 bg-amber-950/30 border border-amber-900/60 rounded-lg text-left flex flex-col space-y-1 animate-fade-in">
-                    <div className="text-[11px] font-mono font-bold text-amber-400 uppercase tracking-wide">
-                      🤖 Active Memory Correction Prompt
-                    </div>
-                    <div className="text-[10px] font-mono text-neutral-300">
-                      {smartCorrectionAlert}
-                    </div>
-                  </div>
-                )}
+      <div className="max-w-6xl mx-auto">
+        {activeTab === 'dashboard' && (
+          <div className="grid grid-cols-12 gap-8">
+            <div className="col-span-8 space-y-8">
+              {/* Context Switcher */}
+              <div className="flex bg-neutral-900 p-1.5 rounded-2xl border border-neutral-800 w-fit mx-auto">
+                <button onClick={() => setIngestionContext('PRIVATE')} className={`px-8 py-2 rounded-xl text-[10px] font-black transition-all ${ingestionContext === 'PRIVATE' ? 'bg-blue-600 text-white shadow-xl shadow-blue-900/20' : 'text-neutral-500'}`}>🔒 PRIVATE MODE</button>
+                <button onClick={() => setIngestionContext('OTHERS')} className={`px-8 py-2 rounded-xl text-[10px] font-black transition-all ${ingestionContext === 'OTHERS' ? 'bg-emerald-600 text-white shadow-xl shadow-emerald-900/20' : 'text-neutral-500'}`}>🏥 OTHERS MODE</button>
               </div>
 
-              {/* Input Console Control box */}
-              <section className="bg-neutral-900/40 border border-neutral-900 p-6 rounded-xl space-y-4">
-                <h2 className="text-sm font-mono text-neutral-400 uppercase tracking-wider">// Control Console</h2>
-                <div className="flex gap-4">
-                  <input
-                    type="text"
-                    value={targetPath}
-                    onChange={(e) => setTargetPath(e.target.value)}
-                    placeholder="e.g., /Users/username/Desktop or /Volumes/Lockerstor"
-                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-4 py-2.5 font-mono text-sm focus:outline-none focus:border-blue-500 text-neutral-200"
-                    disabled={status === "scanning" || status === "batching"}
-                  />
-                  <button
-                    onClick={handleScan}
-                    disabled={status === "scanning" || status === "batching"}
-                    className="bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium tracking-wide transition-colors duration-150 shadow-md shadow-blue-950/20 cursor-pointer disabled:cursor-not-allowed"
-                  >
-                    {status === "scanning" ? "Processing..." : "Trigger Scan"}
-                  </button>
-                  {results.length > 0 && (
-                    <button
-                      onClick={handleBatchOrganize}
-                      disabled={status === "scanning" || status === "batching"}
-                      className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-neutral-800 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium tracking-wide transition-colors duration-150 shadow-md shadow-emerald-950/20 cursor-pointer disabled:cursor-not-allowed"
-                    >
-                      {status === "batching" ? "AI Active..." : "Batch Organize"}
-                    </button>
-                  )}
-                </div>
-              </section>
+              {/* Drop Zone */}
+              <div className={`relative h-64 rounded-3xl border-2 border-dashed flex flex-col items-center justify-center transition-all ${isDragging ? 'border-blue-500 bg-blue-500/5 scale-[1.02]' : 'border-neutral-800 bg-neutral-900/30'}`}>
+                <div className="text-4xl mb-4">{ingestionContext === 'PRIVATE' ? '📄' : '🩺'}</div>
+                <h3 className="text-xs font-black uppercase tracking-widest text-neutral-400">Drop Ingestion Payload</h3>
+                <p className="text-[10px] text-neutral-600 mt-2 font-mono">PDF • DOCX • DICOM • TXT</p>
+                {droppedFileLog && <div className="absolute bottom-6 px-4 py-1.5 bg-black rounded-full border border-neutral-800 text-[10px] font-mono text-blue-400 animate-pulse">{droppedFileLog}</div>}
+              </div>
 
-              {/* Dynamic Status / Feedback Logs */}
-              {status === "scanning" && (
-                <div className="p-12 text-center border border-dashed border-neutral-800 rounded-xl space-y-3">
-                  <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
-                  <p className="text-sm font-mono text-neutral-400 animate-pulse">Scanning file tree hierarchy. Computing size tiers and BLAKE3 blocks...</p>
-                </div>
-              )}
+              {/* Scan Control */}
+              <div className="bg-neutral-900/50 p-6 rounded-3xl border border-neutral-800 flex gap-4">
+                <input type="text" value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder="Target Directory Path..." className="flex-1 bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono focus:border-blue-500 outline-none"/>
+                <button onClick={handleScan} className="bg-blue-600 px-8 py-3 rounded-xl text-xs font-black uppercase hover:bg-blue-500 transition-all">Scan</button>
+                {results.length > 0 && <button onClick={handleBatchOrganize} className="bg-emerald-600 px-8 py-3 rounded-xl text-xs font-black uppercase hover:bg-emerald-500 transition-all">Batch</button>}
+              </div>
 
+              {/* Error Message */}
+              {errorMessage && <div className="bg-red-900/20 border border-red-900/50 text-red-400 p-4 rounded-xl text-xs font-mono">{errorMessage}</div>}
+
+              {/* Batch Progress */}
               {status === "batching" && batchProgress && (
-                <div className="p-8 border border-neutral-800 rounded-xl space-y-6 bg-neutral-900/20 animate-fade-in">
-                  <div className="flex justify-between items-end">
-                    <div className="space-y-1">
-                      <h3 className="text-xs font-mono text-neutral-400 uppercase tracking-widest">// Batch Progress Engine</h3>
-                      <p className="text-sm font-medium text-neutral-200">Processing: {batchProgress.current_file}</p>
-                    </div>
-                    <p className="text-xs font-mono text-neutral-500">{batchProgress.current} / {batchProgress.total} Files</p>
+                <div className="bg-neutral-900/50 p-6 rounded-3xl border border-neutral-800 space-y-4">
+                  <div className="flex justify-between text-[10px] font-black uppercase">
+                    <span className="text-blue-500">Processing: {batchProgress.current_file}</span>
+                    <span>{batchProgress.percentage.toFixed(0)}%</span>
                   </div>
-                  
-                  <div className="w-full bg-neutral-900 h-2 rounded-full overflow-hidden border border-neutral-800">
-                    <div 
-                      className="bg-blue-500 h-full transition-all duration-300 ease-out"
-                      style={{ width: `${batchProgress.percentage}%` }}
-                    />
-                  </div>
-                  
-                  <div className="flex justify-between items-center">
-                    <p className="text-[10px] font-mono text-neutral-500 uppercase tracking-tighter animate-pulse">Gemma 4 executing classification inference...</p>
-                    <p className="text-xs font-bold font-mono text-blue-400">{batchProgress.percentage.toFixed(1)}%</p>
+                  <div className="h-1.5 bg-black rounded-full overflow-hidden">
+                    <div className="bg-blue-600 h-full transition-all" style={{width: `${batchProgress.percentage}%`}}></div>
                   </div>
                 </div>
               )}
 
-              {status === "error" && (
-                <div className="bg-red-950/20 border border-red-900/50 text-red-400 px-4 py-3 rounded-lg font-mono text-sm">
-                  [SYSTEM ERROR]: {errorMessage}
-                </div>
-              )}
-
-              {/* Results Metrics Data View */}
+              {/* Scan Results Table */}
               {status === "success" && (
-                <div className="flex flex-col gap-6 items-start">
-                  {/* Left Side: The Scan Manifest Table */}
-                  <div className="w-full">
-                    <section className="space-y-4 animate-fade-in min-w-0">
-                      <div className="flex justify-between items-center">
-                        <h3 className="text-md font-mono text-neutral-400 uppercase tracking-wider">// Scan Manifest ({showDuplicatesOnly ? duplicateGroups.length : results.length} {showDuplicatesOnly ? "Groups" : "Files"})</h3>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => {
-                              if (showDuplicatesOnly) {
-                                setShowDuplicatesOnly(false);
-                              } else {
-                                fetchIsolatedDuplicates();
-                              }
-                            }}
-                            className={`text-xs font-mono px-3 py-1 rounded border transition-colors cursor-pointer ${showDuplicatesOnly ? 'bg-blue-600 border-blue-500 text-white' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:bg-neutral-800'}`}
-                          >
-                            {showDuplicatesOnly ? "[X] Duplicates Only" : "Show Duplicates Only"}
-                          </button>
-                        </div>
-                      </div>
-
-                      {showDuplicatesOnly ? (
-                        <div className="mt-6 space-y-4">
-                          <div className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider mb-2">
-                            ⚠️ Cryptographic Duplicate Groups Isolated
-                          </div>
-                          
-                          {duplicateGroups.map((group, groupIdx) => (
-                            <div key={groupIdx} className="bg-neutral-950 border border-neutral-850 rounded-lg p-4 shadow-xl">
-                              <div className="flex justify-between items-center border-b border-neutral-900 pb-2 mb-3">
-                                <span className="font-mono text-[10px] text-neutral-500">HASH: <span className="text-neutral-300">{group.hash.substring(0, 16)}...</span></span>
-                                <span className="text-[11px] font-mono bg-neutral-900 px-2 py-0.5 rounded text-amber-400 border border-neutral-800">{group.fileSize}</span>
-                              </div>
-                              
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {group.paths.map((file: any, fileIdx: number) => {
-                                  const isNas = file.path.includes("sftp://") || file.path.includes("/Volume/NAS");
-                                  return (
-                                    <div key={fileIdx} className="bg-black border border-neutral-900 p-3 rounded flex flex-col justify-between">
-                                      <div>
-                                        <div className="flex items-center space-x-2 mb-1">
-                                          <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded ${isNas ? 'bg-blue-950 text-blue-400 border border-blue-900' : 'bg-emerald-950 text-emerald-400 border border-emerald-900'}`}>
-                                            {isNas ? "🖥️ ASUSTOR NAS" : "💻 LOCAL MAC"}
-                                          </span>
-                                          <span className="text-[11px] font-mono text-neutral-400 truncate block max-w-[200px]">
-                                            {file.name}
-                                          </span>
-                                        </div>
-                                        <div className="text-[10px] font-mono text-neutral-600 break-all select-all p-1 bg-neutral-950 rounded border border-neutral-900 mt-1">
-                                          {file.path}
-                                        </div>
-                                      </div>
-                                      
-                                      <button 
-                                        onClick={() => handleDeleteClick(file.path)}
-                                        className="mt-3 w-full bg-red-950/40 hover:bg-red-900/60 border border-red-900/50 hover:border-red-600 text-red-200 font-mono text-[10px] py-1 rounded transition-all tracking-wide uppercase cursor-pointer"
-                                      >
-                                        Vaporize Copy 🗑️
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="bg-neutral-900/20 border border-neutral-900 rounded-xl overflow-hidden">
-                          <div className="max-h-[500px] overflow-y-auto font-mono text-xs">
-                            <table className="w-full text-left border-collapse">
-                              <thead>
-                                <tr className="bg-neutral-900/60 border-b border-neutral-900 text-neutral-400 uppercase tracking-wider text-[10px] sticky top-0 z-10">
-                                  <th className="p-4">File Name</th>
-                                  <th className="p-4">Size</th>
-                                  <th className="p-4">Full BLAKE3 Hash</th>
-                                  <th className="p-4">Absolute Target Path</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-neutral-900">
-                                {results.map((file, idx) => (
-                                  <tr 
-                                    key={idx} 
-                                    onClick={() => {
-                                      setSelectedFile(file);
-                                      setAiResult(null);
-                                    }}
-                                    className={`hover:bg-neutral-900/30 transition-colors cursor-pointer ${selectedFile?.file_path === file.file_path ? 'bg-blue-900/20 border-l-2 border-l-blue-500' : ''}`}
-                                  >
-                                    <td className="p-4 font-medium text-neutral-200 max-w-[200px] truncate">{file.file_name}</td>
-                                    <td className="p-4 text-neutral-400 whitespace-nowrap">{formatBytes(file.file_size)}</td>
-                                    <td className="p-4 text-blue-400/80 font-semibold">{file.full_hash ? `${file.full_hash.substring(0, 12)}...` : "Skipped"}</td>
-                                    <td className="p-4 text-neutral-500 truncate max-w-[300px]">{file.file_path}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-                    </section>
+                <div className="bg-neutral-900/30 border border-neutral-800 rounded-3xl overflow-hidden">
+                  <div className="max-h-96 overflow-y-auto">
+                    <table className="w-full text-[10px] font-mono">
+                      <thead className="bg-neutral-900 text-neutral-500 sticky top-0">
+                        <tr>
+                          <th className="p-4 text-left">Filename</th>
+                          <th className="p-4 text-left">Size</th>
+                          <th className="p-4 text-left">Hash</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-900">
+                        {results.map((file, i) => (
+                          <tr key={i} className={`hover:bg-neutral-800/50 cursor-pointer ${selectedFile?.file_path === file.file_path ? 'bg-blue-600/10' : ''}`} onClick={() => setSelectedFile(file)}>
+                            <td className="p-4 text-neutral-300">{file.file_name}</td>
+                            <td className="p-4 text-neutral-500">{formatBytes(file.file_size)}</td>
+                            <td className="p-4 text-blue-900 font-bold">{file.full_hash?.slice(0, 12)}...</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-
-                  {/* Sidebar AI Insights (Inline if selected) */}
-                  {selectedFile && (
-                    <div className="w-full bg-neutral-900 border border-neutral-800 p-6 rounded-xl animate-slide-in space-y-6 shadow-2xl">
-                      <div className="flex justify-between items-start">
-                        <h3 className="text-xs font-mono text-neutral-400 uppercase tracking-widest">// AI Insights Panel</h3>
-                        <button onClick={() => setSelectedFile(null)} className="text-[10px] text-neutral-500 hover:text-white">✕ Close</button>
-                      </div>
-                      <div className="space-y-2">
-                        <p className="text-sm font-medium text-neutral-200 break-all">{selectedFile?.file_name}</p>
-                        <p className="text-[10px] text-neutral-500 font-mono truncate">{selectedFile?.file_path}</p>
-                      </div>
-
-                      <button
-                        onClick={handleAiAnalyze}
-                        disabled={isAiLoading}
-                        className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 text-white font-mono text-xs py-3 rounded-lg font-medium transition-all cursor-pointer"
-                      >
-                        {isAiLoading ? "Gemma 4 Thinking..." : "Analyze Content with Gemma 4"}
-                      </button>
-
-                      {aiResult && (
-                        <div className="space-y-4 animate-fade-in border-t border-neutral-800 pt-4">
-                          <div className="flex justify-between items-start">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono">Confidence</label>
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${aiResult.confidence_score > 0.8 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                              {(aiResult.confidence_score * 100).toFixed(1)}%
-                            </span>
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono">Category</label>
-                            <p className="text-sm font-mono text-blue-400 bg-blue-900/10 border border-blue-900/30 p-2 rounded">{aiResult.suggested_subfolder}</p>
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-[10px] text-neutral-500 uppercase font-mono">Reasoning</label>
-                            <p className="text-[11px] text-neutral-400 leading-relaxed italic border-l-2 border-neutral-800 pl-3">"{aiResult.reasoning}"</p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
               )}
             </div>
 
-            {/* RIGHT SIDE: INTERACTIVE ADMIN CONTROL PANEL (Cols 5) */}
-            <div className="lg:col-span-5 bg-neutral-950 border border-neutral-800 rounded-xl p-5 space-y-6 sticky top-8">
-              <div className="text-xs font-bold text-blue-400 border-b border-neutral-900 pb-2 uppercase tracking-wider">
-                👥 Family Identity & Profile Registry Presets
-              </div>
-              
-              <div className="space-y-3">
-                {familyRegistry.map((member, index) => (
-                  <div key={member.key} className="bg-neutral-900/60 p-3 rounded-lg border border-neutral-850 text-[11px] flex flex-col space-y-2">
-                    <div className="flex justify-between items-center">
-                      <span className="text-neutral-400 uppercase font-bold text-[10px]">{member.role}</span>
-                      <span className="text-neutral-500 font-bold">ID: {member.key}</span>
+            {/* Side Panel: Identity + Insights */}
+            <div className="col-span-4 space-y-6">
+              {/* AI Insights Panel */}
+              {selectedFile && (
+                <div className="bg-blue-600/5 border border-blue-500/20 rounded-3xl p-6 space-y-4 animate-fade-in">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-blue-500">AI Intelligence</h3>
+                  <div className="text-xs font-bold text-neutral-300 break-all">{selectedFile.file_name}</div>
+                  <button onClick={handleAiAnalyze} disabled={isAiLoading} className="w-full bg-blue-600 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-500 transition-all disabled:opacity-50">{isAiLoading ? 'Analyzing...' : 'Deep Classification'}</button>
+                  {aiResult && (
+                    <div className="p-4 bg-black/40 rounded-2xl border border-neutral-800 space-y-3">
+                       <div className="flex justify-between text-[8px] font-black uppercase">
+                         <span className="text-neutral-500">Confidence</span>
+                         <span className="text-emerald-400">{(aiResult.confidence_score * 100).toFixed(0)}%</span>
+                       </div>
+                       <div className="text-xs font-mono text-blue-400">{aiResult.suggested_subfolder}</div>
+                       <div className="text-[10px] text-neutral-500 italic">"{aiResult.reasoning}"</div>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input 
-                        type="text" 
-                        value={member.full_name} 
-                        className="bg-black border border-neutral-800 px-2 py-1 rounded text-white focus:border-blue-500 outline-none"
-                        onChange={(e) => {
-                          const updated = [...familyRegistry];
-                          updated[index].full_name = e.target.value;
-                          setFamilyRegistry(updated);
-                        }}
-                      />
-                      <input 
-                        type="text" 
-                        value={member.birth_date} 
-                        placeholder="DD.MM.YYYY"
-                        className="bg-black border border-neutral-800 px-2 py-1 rounded text-neutral-400 text-center focus:border-blue-500 outline-none"
-                        onChange={(e) => {
-                          const updated = [...familyRegistry];
-                          updated[index].birth_date = e.target.value;
-                          setFamilyRegistry(updated);
-                        }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+              )}
 
-              <div className="text-xs font-bold text-emerald-400 border-b border-neutral-900 pb-2 pt-2 uppercase tracking-wider">
-                🌳 Sortment Tree Path Fine-Tuning
-              </div>
-              <div className="p-3 bg-neutral-900/40 border border-neutral-850 rounded-lg text-xs space-y-2">
-                <span className="text-neutral-500 text-[10px] block">ACTIVE MANUALLY CONFIGURABLE DESTINATION PATH:</span>
-                <input 
-                  type="text"
-                  value={editableTreePath}
-                  onChange={(e) => setEditableTreePath(e.target.value)}
-                  className="w-full bg-black border border-neutral-800 px-3 py-2 rounded text-emerald-400 font-mono text-[11px] focus:border-emerald-500 outline-none"
-                  placeholder="Tfatleek_Output/Medizinische_Praxis/2026/05_Month"
-                />
+              <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-6">
+                <h3 className="text-[10px] font-black uppercase tracking-widest text-blue-500 mb-6">Family Registry</h3>
+                <div className="space-y-4">
+                  {familyRegistry.map(member => (
+                    <div key={member.key} className="bg-black/50 p-4 rounded-2xl border border-neutral-800">
+                      <div className="flex justify-between text-[8px] font-black uppercase text-neutral-600 mb-2">
+                        <span>{member.role}</span>
+                        <span>{member.key}</span>
+                      </div>
+                      <div className="text-xs font-bold text-neutral-300">{member.full_name}</div>
+                      <div className="text-[10px] text-neutral-500 mt-1">{member.birth_date}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-        ) : (
-          <section className="bg-neutral-900/40 border border-neutral-900 p-8 rounded-xl space-y-8 animate-fade-in">
-            <div className="space-y-2">
-              <h2 className="text-sm font-mono text-neutral-400 uppercase tracking-wider">// Global Exclusion Engine</h2>
-              <p className="text-xs text-neutral-500">Configure file extensions that the AI batching engine should skip during processing. (e.g., srt, mp4, log)</p>
-            </div>
+        )}
 
-            <div className="space-y-4">
-              <div className="flex gap-4">
-                <input
-                  type="text"
-                  value={newExtension}
-                  onChange={(e) => setNewExtension(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && newExtension.trim()) {
-                      const ext = newExtension.trim().toLowerCase().replace(/^\./, '');
-                      if (!excludedExtensions.includes(ext)) {
-                        setExcludedExtensions([...excludedExtensions, ext]);
-                      }
-                      setNewExtension("");
-                    }
-                  }}
-                  placeholder="Add extension (e.g. srt)"
-                  className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-4 py-2.5 font-mono text-sm focus:outline-none focus:border-blue-500 text-neutral-200"
-                />
-                <button
-                  onClick={() => {
-                    if (newExtension.trim()) {
-                      const ext = newExtension.trim().toLowerCase().replace(/^\./, '');
-                      if (!excludedExtensions.includes(ext)) {
-                        setExcludedExtensions([...excludedExtensions, ext]);
-                      }
-                      setNewExtension("");
-                    }
-                  }}
-                  className="bg-blue-600 hover:bg-blue-500 text-white font-mono text-sm px-6 py-2.5 rounded-lg font-medium transition-colors cursor-pointer"
-                >
-                  Add
-                </button>
+        {activeTab === 'settings' && (
+          <div className="grid grid-cols-2 gap-8 animate-fade-in">
+            <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
+              <h2 className="text-xs font-black uppercase tracking-widest text-blue-500">Paperless Config</h2>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[10px] text-neutral-500 uppercase font-black block mb-2">NAS IP Address</label>
+                  <input type="text" value={appSettings.paperless_nas_ip} onChange={(e) => setAppSettings({...appSettings, paperless_nas_ip: e.target.value})} placeholder="192.168.1.100" className="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono focus:border-blue-500 outline-none"/>
+                </div>
+                <div>
+                  <label className="text-[10px] text-neutral-500 uppercase font-black block mb-2">REST API Token</label>
+                  <input type="password" value={appSettings.paperless_api_token} onChange={(e) => setAppSettings({...appSettings, paperless_api_token: e.target.value})} placeholder="••••••••••••••••" className="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono focus:border-blue-500 outline-none text-emerald-500"/>
+                </div>
+                <button onClick={savePaperlessConfig} className="w-full bg-blue-600 py-3 rounded-xl text-[10px] font-black uppercase hover:bg-blue-500 transition-all">Secure Credentials</button>
               </div>
-
-              <div className="flex flex-wrap gap-3 pt-4">
-                {excludedExtensions.map((ext) => (
-                  <div 
-                    key={ext}
-                    className="group flex items-center gap-2 bg-neutral-900 border border-neutral-800 px-3 py-1.5 rounded-md hover:border-red-900/50 transition-all"
-                  >
-                    <span className="text-xs font-mono text-neutral-300">.{ext}</span>
-                    <button 
-                      onClick={() => setExcludedExtensions(excludedExtensions.filter(e => e !== ext))}
-                      className="text-neutral-600 hover:text-red-400 text-xs transition-colors"
-                    >
-                      ✕
-                    </button>
+            </div>
+            <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
+              <h2 className="text-xs font-black uppercase tracking-widest text-red-500">Exclusion Manager</h2>
+              <div className="flex gap-2">
+                <input type="text" value={newExclusion} onChange={(e) => setNewExclusion(e.target.value)} placeholder="Folder name or path..." className="flex-1 bg-black border border-neutral-800 rounded-xl px-4 py-2 text-xs font-mono focus:border-red-500 outline-none"/>
+                <button onClick={addExclusion} className="bg-neutral-800 px-6 py-2 rounded-xl text-[10px] font-black uppercase">+</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {appSettings.excluded_folders.map(folder => (
+                  <div key={folder} className="bg-black border border-neutral-800 px-3 py-1 rounded-full text-[10px] font-mono flex items-center gap-2">
+                    {folder}
+                    <button onClick={() => removeExclusion(folder)} className="text-neutral-600 hover:text-red-500">✕</button>
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className="pt-8 border-t border-neutral-900 flex justify-between items-center">
-              <p className="text-[10px] font-mono text-neutral-600 italic">Settings are saved in local session memory.</p>
-              <button 
-                onClick={() => setExcludedExtensions(['srt', 'vtt', 'pyc', 'jsn', 'gz', 'html', 'png', 'jpg', 'gif'])}
-                className="text-[10px] font-mono text-neutral-500 hover:text-neutral-300 underline underline-offset-4 decoration-neutral-800"
-              >
-                Reset to Defaults
-              </button>
+            <div className="col-span-2 bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
+              <h2 className="text-xs font-black uppercase tracking-widest text-emerald-500">Path Mappings</h2>
+              <div className="grid grid-cols-2 gap-6">
+                 <div className="space-y-4">
+                    <div className="flex gap-2">
+                      <input id="new-path-name" type="text" placeholder="Preset Name (e.g. NAS_DOCS)" className="flex-1 bg-black border border-neutral-800 rounded-xl px-4 py-2 text-xs font-mono outline-none"/>
+                      <input id="new-path-value" type="text" placeholder="/Volumes/NAS/Docs" className="flex-1 bg-black border border-neutral-800 rounded-xl px-4 py-2 text-xs font-mono outline-none"/>
+                      <button onClick={async () => {
+                        const name = (document.getElementById('new-path-name') as HTMLInputElement).value;
+                        const path = (document.getElementById('new-path-value') as HTMLInputElement).value;
+                        if (name && path) {
+                          await invoke('add_preset_path', { name, path });
+                          const settings = await invoke<AppSettings>("get_settings");
+                          setAppSettings(settings);
+                        }
+                      }} className="bg-emerald-600 px-4 py-2 rounded-xl text-[10px] font-black uppercase">Add</button>
+                    </div>
+                 </div>
+                 <div className="space-y-2">
+                    {Object.entries(appSettings.preset_paths).map(([name, path]) => (
+                      <div key={name} className="flex justify-between items-center bg-black/40 border border-neutral-800 p-3 rounded-xl">
+                        <span className="text-[10px] font-black text-neutral-400 uppercase">{name}</span>
+                        <span className="text-[10px] font-mono text-emerald-500 truncate max-w-[200px]">{path}</span>
+                      </div>
+                    ))}
+                 </div>
+              </div>
             </div>
-          </section>
+
+            <div className="col-span-2 bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
+              <h2 className="text-xs font-black uppercase tracking-widest text-blue-500">Shortcut Tab Manager</h2>
+              <div className="grid grid-cols-4 gap-4">
+                {availableShortcuts.map(s => (
+                  <button key={s.id} onClick={() => toggleShortcut(s.id)} className={`p-6 rounded-3xl border text-center transition-all ${shortcuts.includes(s.id) ? 'bg-emerald-600/10 border-emerald-500/50 text-emerald-500' : 'bg-black border-neutral-800 text-neutral-600'}`}>
+                    <div className="text-2xl mb-2">{shortcuts.includes(s.id) ? '📌' : '📍'}</div>
+                    <div className="text-[10px] font-black uppercase tracking-widest">{s.label}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Dynamic Shortcuts */}
+        {activeTab === 'EXCLUSION SETTINGS' && (
+          <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 animate-fade-in">
+             <h2 className="text-xs font-black uppercase tracking-widest text-red-500 mb-6">Quick Exclusion Access</h2>
+             <div className="flex gap-2 mb-4">
+                <input type="text" value={newExclusion} onChange={(e) => setNewExclusion(e.target.value)} className="flex-1 bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono focus:border-red-500 outline-none"/>
+                <button onClick={addExclusion} className="bg-blue-600 px-8 rounded-xl text-xs font-black uppercase">Add</button>
+             </div>
+             <div className="flex flex-wrap gap-2">
+                {appSettings.excluded_folders.map(folder => (
+                  <div key={folder} className="bg-black border border-neutral-800 px-4 py-2 rounded-xl text-xs font-mono flex items-center gap-2">
+                    {folder}
+                    <button onClick={() => removeExclusion(folder)} className="text-red-500">✕</button>
+                  </div>
+                ))}
+             </div>
+          </div>
+        )}
+
+        {activeTab === 'FAMILY PRESETS' && (
+          <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 animate-fade-in">
+             <h2 className="text-xs font-black uppercase tracking-widest text-blue-500 mb-6">Quick Family Presets</h2>
+             <div className="grid grid-cols-2 gap-4">
+                {familyRegistry.map(member => (
+                  <div key={member.key} className="bg-black p-4 rounded-2xl border border-neutral-800">
+                    <div className="text-[8px] font-black text-neutral-500 uppercase mb-2">{member.role}</div>
+                    <div className="text-sm font-bold text-neutral-300 mb-1">{member.full_name}</div>
+                    <div className="text-[10px] text-neutral-500">{member.birth_date}</div>
+                  </div>
+                ))}
+             </div>
+          </div>
+        )}
+
+        {activeTab === 'PATH MAPPINGS' && (
+          <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 animate-fade-in">
+             <h2 className="text-xs font-black uppercase tracking-widest text-emerald-500 mb-6">Quick Path Mappings</h2>
+             <div className="space-y-4">
+                {Object.entries(appSettings.preset_paths).map(([name, path]) => (
+                  <div key={name} className="flex flex-col gap-1">
+                    <span className="text-[10px] font-black text-neutral-600 uppercase">{name}</span>
+                    <div className="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-xs font-mono text-emerald-500">{path}</div>
+                  </div>
+                ))}
+             </div>
+          </div>
+        )}
+
+        {activeTab === 'PAPERLESS CONFIG' && (
+          <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 animate-fade-in">
+             <h2 className="text-xs font-black uppercase tracking-widest text-blue-500 mb-6">Quick Paperless Access</h2>
+             <div className="grid grid-cols-2 gap-4 mb-6">
+                <input type="text" value={appSettings.paperless_nas_ip} onChange={(e) => setAppSettings({...appSettings, paperless_nas_ip: e.target.value})} className="bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono" placeholder="IP Address"/>
+                <input type="password" value={appSettings.paperless_api_token} onChange={(e) => setAppSettings({...appSettings, paperless_api_token: e.target.value})} className="bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono" placeholder="API Token"/>
+             </div>
+             <button onClick={savePaperlessConfig} className="w-full bg-blue-600 py-3 rounded-xl text-xs font-black uppercase">Secure New Config</button>
+          </div>
         )}
       </div>
     </main>
