@@ -22,6 +22,14 @@ impl DbManager {
         
         // Enable foreign keys
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
+        
+        // Performance & Concurrency Optimization: Enable Write-Ahead Log (WAL) mode
+        // This allows multiple readers and one writer to operate simultaneously without blocking.
+        conn.pragma_update(None, "journal_mode", &"WAL")?;
+        conn.pragma_update(None, "synchronous", &"NORMAL")?;
+        
+        // Set a busy timeout to avoid immediate "database is locked" errors
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         // Create tables
         conn.execute_batch(
@@ -44,7 +52,10 @@ impl DbManager {
                 file_id INTEGER PRIMARY KEY,
                 extracted_text TEXT,
                 suggested_subfolder TEXT,
+                category TEXT,
+                correspondent TEXT,
                 confidence_score REAL DEFAULT 0.0,
+                tax_relevant INTEGER DEFAULT 0,
                 is_tax_relevant INTEGER DEFAULT 0,
                 identified_member TEXT,
                 ai_processed_at INTEGER,
@@ -60,6 +71,16 @@ impl DbManager {
                 status TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS file_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                operation_type TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                destination_path TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS file_knowledge_graph (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 blake3_hash TEXT UNIQUE,
@@ -71,6 +92,28 @@ impl DbManager {
             );
             COMMIT;"
         )?;
+
+        // Non-destructive migration check
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(ai_metadata);")?;
+            let columns: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            
+            if !columns.contains(&"category".to_string()) {
+                conn.execute("ALTER TABLE ai_metadata ADD COLUMN category TEXT;", [])?;
+            }
+            if !columns.contains(&"correspondent".to_string()) {
+                conn.execute("ALTER TABLE ai_metadata ADD COLUMN correspondent TEXT;", [])?;
+            }
+            if !columns.contains(&"tax_relevant".to_string()) {
+                conn.execute("ALTER TABLE ai_metadata ADD COLUMN tax_relevant INTEGER DEFAULT 0;", [])?;
+                // Port legacy data if is_tax_relevant exists
+                if columns.contains(&"is_tax_relevant".to_string()) {
+                    conn.execute("UPDATE ai_metadata SET tax_relevant = is_tax_relevant WHERE tax_relevant = 0;", [])?;
+                }
+            }
+        }
 
         Ok(DbManager {
             conn: Arc::new(Mutex::new(conn)),

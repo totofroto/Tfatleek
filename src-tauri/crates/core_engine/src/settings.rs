@@ -4,12 +4,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub preset_paths: HashMap<String, String>,
     pub excluded_folders: HashSet<String>,
     pub paperless_nas_ip: String,
     pub paperless_api_token: String,
+    pub papers_output_base: String,
+    pub ollama_base_url: String,
+    pub ollama_model: String,
+    pub gemini_api_key: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            preset_paths: HashMap::new(),
+            excluded_folders: HashSet::new(),
+            paperless_nas_ip: String::new(),
+            paperless_api_token: String::new(),
+            papers_output_base: "/Volumes/Papers/Tfatleek_Output".to_string(),
+            ollama_base_url: "http://192.168.254.14:11434".to_string(),
+            ollama_model: "qwen3:14b".to_string(),
+            gemini_api_key: "".to_string(),
+        }
+    }
 }
 
 pub struct SettingsManager {
@@ -36,7 +55,12 @@ impl SettingsManager {
     pub fn save(&self) -> Result<(), String> {
         let settings = self.current.read().map_err(|e| e.to_string())?;
         let data = serde_json::to_string_pretty(&*settings).map_err(|e| e.to_string())?;
-        fs::write(&self.settings_path, data).map_err(|e| e.to_string())?;
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory '{}': {}", parent.display(), e))?;
+        }
+        fs::write(&self.settings_path, &data)
+            .map_err(|e| format!("Failed to write settings to '{}': {}", self.settings_path.display(), e))?;
         Ok(())
     }
 
@@ -62,6 +86,15 @@ impl SettingsManager {
             settings.excluded_folders.remove(folder);
         }
         self.save()
+    }
+
+    pub fn papers_output_base(&self) -> String {
+        let settings = self.current.read().unwrap();
+        if settings.papers_output_base.is_empty() {
+            "/Volumes/Papers/Tfatleek_Output".to_string()
+        } else {
+            settings.papers_output_base.clone()
+        }
     }
 
     pub fn is_path_protected(&self, path: &str) -> bool {

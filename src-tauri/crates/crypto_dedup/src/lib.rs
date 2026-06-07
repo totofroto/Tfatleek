@@ -16,6 +16,27 @@ pub struct ScanResult {
     pub full_hash: Option<String>,
 }
 
+/// Polls the file until its size has been stable for two consecutive readings.
+/// Protects against reading a file still being written by the scanner over SMB.
+/// Returns `true` if stable, `false` if still changing or unreadable after `max_polls`.
+pub fn wait_for_file_stable(path: &Path, max_polls: u32, interval_ms: u64) -> bool {
+    let mut prev_size: Option<u64> = None;
+    for _ in 0..max_polls {
+        match std::fs::metadata(path) {
+            Ok(m) if m.len() > 0 => {
+                let size = m.len();
+                if prev_size == Some(size) {
+                    return true;
+                }
+                prev_size = Some(size);
+            }
+            _ => return false,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+    }
+    false
+}
+
 pub fn is_safe_to_scan(path: &std::path::Path) -> bool {
     let path_str = path.to_string_lossy().to_lowercase();
     
@@ -57,6 +78,10 @@ pub fn run_dedup_scan<P: AsRef<Path>>(root_path: P) -> Vec<ScanResult> {
             let mut partial_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
             
             for path in paths {
+                // Skip files still being written (SMB scanner write race)
+                if !wait_for_file_stable(&path, 5, 200) {
+                    continue;
+                }
                 if let Ok(p_hash) = compute_partial_hash(&path) {
                     partial_groups.entry(p_hash).or_default().push(path);
                 }

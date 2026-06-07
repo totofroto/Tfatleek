@@ -39,9 +39,18 @@ async fn start_dedup_scan(handle: tauri::AppHandle, target_path: String) -> Resu
 #[tauri::command]
 async fn classify_file_with_ai(handle: tauri::AppHandle, file_path: String) -> Result<String, String> {
     let db_path = get_db_path(&handle);
-    let model_target = "gemma4:e4b"; // Pinning optimized model size for 16GB systems
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    let (ollama_url, ollama_model, gemini_key) = {
+        let settings = settings_mgr.current.read().unwrap();
+        (
+            settings.ollama_base_url.clone(),
+            settings.ollama_model.clone(),
+            settings.gemini_api_key.clone(),
+        )
+    };
 
-    match core_engine::run_ai_classification(&file_path, &db_path, model_target, core_engine::IngestionContext::Private).await {
+    match core_engine::run_ai_classification(&file_path, &db_path, &ollama_url, &ollama_model, &gemini_key, core_engine::IngestionContext::Private).await {
         Ok(result) => {
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
@@ -64,6 +73,20 @@ async fn trigger_system_undo(handle: tauri::AppHandle) -> Result<String, String>
 }
 
 #[tauri::command]
+async fn undo_last_batch(handle: tauri::AppHandle, batch_id: String) -> Result<(), String> {
+    let db_path = get_db_path(&handle);
+    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
+    let protected_paths = {
+        let settings = settings_mgr.current.read().unwrap();
+        settings.preset_paths.values().cloned().collect::<Vec<String>>()
+    };
+    
+    let fs_engine = core_engine::transactions::SafeFileSystemEngine::new(&db_path, protected_paths);
+    fs_engine.execute_system_undo(batch_id).await
+}
+
+#[tauri::command]
 async fn trigger_batch_ai_organization(
     app_handle: tauri::AppHandle, 
     target_path: String,
@@ -77,9 +100,8 @@ async fn trigger_batch_ai_organization(
     let app_local_data = app_handle.path().app_local_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let db_path = app_local_data.join("tfatleek_state.db");
     let db_path_str = db_path.to_string_lossy();
-    let model_target = "gemma4:e4b";
 
-    core_engine::execute_batch_organization(app_handle, &target_path, &db_path_str, model_target).await
+    core_engine::execute_batch_organization(app_handle, &target_path, &db_path_str).await
 }
 
 #[tauri::command]
@@ -154,13 +176,13 @@ async fn index_master_tree(target_path: String) -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn process_single_dropped_file(handle: tauri::AppHandle, path: String, context: core_engine::IngestionContext) -> Result<String, String> {
     let db_path = get_db_path(&handle);
-    let model_target = "gemma4:e4b";
-    core_engine::process_single_dropped_file(handle, &path, &db_path, model_target, context).await
+    core_engine::process_single_dropped_file(handle, &path, &db_path, context).await
 }
 
 #[tauri::command]
 async fn execute_relocation_commit(
     handle: tauri::AppHandle,
+    batch_id: String,
     original_path: String,
     suggested_name: String,
     identified_category: String,
@@ -171,6 +193,7 @@ async fn execute_relocation_commit(
     let db_path = get_db_path(&handle);
     core_engine::execute_relocation_commit(
         handle,
+        batch_id,
         original_path,
         suggested_name,
         identified_category,
@@ -195,19 +218,41 @@ fn get_family_presets() -> Vec<core_engine::FamilyMember> {
 async fn submit_to_paperless_vault(
     handle: tauri::AppHandle,
     file_path: String,
-    context: core_engine::IngestionContext,
-) -> Result<(), String> {
-    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
-    let settings = settings_mgr.current.read().map_err(|e| e.to_string())?.clone();
+) -> Result<core_engine::paperless_bridge::BridgeResponse, String> {
     let db_path = get_db_path(&handle);
     
-    core_engine::paperless_bridge::upload_to_paperless(
-        std::path::PathBuf::from(file_path),
-        context,
-        settings,
-        db_path
-    ).await
+    // 1. Dispatch upload to Paperless-ngx vault
+    let resp = core_engine::paperless_bridge::submit_to_paperless_vault(file_path.clone()).await?;
+    
+    // 2. Post-Ingestion Reconciliation (Phase D)
+    if resp.status == "SUCCESS" {
+        let db = database::DbManager::init(&db_path).map_err(|e| e.to_string())?;
+        
+        // Register a virtual transaction to satisfy safety ledger verification
+        if let Ok(conn_lock) = db.conn.lock() {
+            let _ = conn_lock.execute(
+                "INSERT INTO file_transactions (batch_id, operation_type, source_path, destination_path, status) 
+                 VALUES (?1, 'VAULT', ?2, 'PAPERLESS_NGX', 'COMMITTED')",
+                rusqlite::params!["paperless_ingestion", file_path],
+            );
+        }
+
+        // Fetch file hash for multi-factor reconciliation verification
+        let file_hash: String = if let Ok(conn_lock) = db.conn.lock() {
+            conn_lock.query_row(
+                "SELECT full_hash FROM file_index WHERE file_path = ?1",
+                rusqlite::params![file_path],
+                |row| row.get(0)
+            ).unwrap_or_else(|_| "".to_string())
+        } else {
+            "".to_string()
+        };
+
+        // Trigger the safe reconciliation & pruning layer
+        core_engine::reconcile_and_prune_source(&db_path, &file_hash, &file_path).await?;
+    }
+    
+    Ok(resp)
 }
 
 #[tauri::command]
@@ -216,7 +261,8 @@ async fn update_paperless_settings(
     nas_ip: String,
     api_token: String,
 ) -> Result<(), String> {
-    let config_dir = handle.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config_dir = handle.path().app_config_dir()
+        .map_err(|e| format!("Failed to resolve app config directory: {}", e))?;
     let settings_mgr = core_engine::settings::SettingsManager::new(&config_dir);
     {
         let mut settings = settings_mgr.current.write().map_err(|e| e.to_string())?;
@@ -234,6 +280,7 @@ pub fn run() {
             start_dedup_scan,
             classify_file_with_ai,
             trigger_system_undo,
+            undo_last_batch,
             trigger_batch_ai_organization,
             fetch_isolated_duplicates,
             execute_file_deletion,

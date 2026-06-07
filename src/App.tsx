@@ -73,6 +73,9 @@ export default function App() {
 
   const [familyRegistry, setFamilyRegistry] = useState<FamilyMember[]>([]);
 
+  const [settingsSaveStatus, setSettingsSaveStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [settingsSaveError, setSettingsSaveError] = useState("");
+
   // Settings State
   const [appSettings, setAppSettings] = useState<AppSettings>({
     preset_paths: {},
@@ -224,11 +227,14 @@ export default function App() {
     try {
       await invoke("update_paperless_settings", {
         nasIp: appSettings.paperless_nas_ip,
-        api_token: appSettings.paperless_api_token
+        apiToken: appSettings.paperless_api_token
       });
-      alert("Settings Secured.");
+      setSettingsSaveStatus("saved");
+      setSettingsSaveError("");
+      setTimeout(() => setSettingsSaveStatus("idle"), 3000);
     } catch (error) {
-      alert(`Save Failed: ${error}`);
+      setSettingsSaveStatus("error");
+      setSettingsSaveError(String(error));
     }
   };
 
@@ -474,6 +480,12 @@ export default function App() {
                   <input type="password" value={appSettings.paperless_api_token} onChange={(e) => setAppSettings({...appSettings, paperless_api_token: e.target.value})} placeholder="••••••••••••••••" className="w-full bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono focus:border-blue-500 outline-none text-emerald-500"/>
                 </div>
                 <button onClick={savePaperlessConfig} className="w-full bg-blue-600 py-3 rounded-xl text-[10px] font-black uppercase hover:bg-blue-500 transition-all">Secure Credentials</button>
+                {settingsSaveStatus === "saved" && (
+                  <p className="text-emerald-400 text-[10px] font-black uppercase text-center tracking-widest">✓ Settings Secured</p>
+                )}
+                {settingsSaveStatus === "error" && (
+                  <p className="text-red-400 text-[10px] font-black uppercase text-center tracking-widest">✗ Save Failed: {settingsSaveError}</p>
+                )}
               </div>
             </div>
             <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
@@ -591,6 +603,12 @@ export default function App() {
                 <input type="password" value={appSettings.paperless_api_token} onChange={(e) => setAppSettings({...appSettings, paperless_api_token: e.target.value})} className="bg-black border border-neutral-800 rounded-xl px-4 py-3 text-sm font-mono" placeholder="API Token"/>
              </div>
              <button onClick={savePaperlessConfig} className="w-full bg-blue-600 py-3 rounded-xl text-xs font-black uppercase">Secure New Config</button>
+             {settingsSaveStatus === "saved" && (
+               <p className="text-emerald-400 text-[10px] font-black uppercase text-center tracking-widest mt-3">✓ Settings Secured</p>
+             )}
+             {settingsSaveStatus === "error" && (
+               <p className="text-red-400 text-[10px] font-black uppercase text-center tracking-widest mt-3">✗ Save Failed: {settingsSaveError}</p>
+             )}
           </div>
         )}
       </div>

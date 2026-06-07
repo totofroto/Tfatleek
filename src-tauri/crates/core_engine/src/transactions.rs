@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use database::DbManager;
+use rusqlite::params;
+
+const ALLOWED_EXTENSIONS: &[&str] = &["pdf", "docx", "doc", "txt", "log", "dcm", "dicom"];
 
 pub struct SafeFileSystemEngine {
     db_path: String,
@@ -21,11 +24,22 @@ impl SafeFileSystemEngine {
                 return true;
             }
         }
+        // Strict system root guards
+        if path == Path::new("/") || path == Path::new("/Users") {
+            return true;
+        }
+        false
+    }
+
+    fn is_allowed_extension(&self, path: &Path) -> bool {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            return ALLOWED_EXTENSIONS.contains(&ext.to_lowercase().as_str());
+        }
         false
     }
 
     /// Safely executes a file displacement (Move/Rename) backed by the pre-flight safety ledger
-    pub fn execute_safe_move(&self, src: &str, dest: &str) -> Result<(), String> {
+    pub fn execute_safe_move(&self, batch_id: &str, src: &str, dest: &str) -> Result<(), String> {
         let src_path = Path::new(src);
         let mut dest_path = PathBuf::from(dest);
 
@@ -36,6 +50,11 @@ impl SafeFileSystemEngine {
         // Safety Lock: Prevent any operations on protected paths that might lead to data loss
         if self.is_protected(src_path) {
             return Err(format!("Safety Lock: Operation forbidden on protected path: {}", src));
+        }
+
+        // Extension Guardrail
+        if !self.is_allowed_extension(src_path) {
+            return Err(format!("Safety Lock: File type not in whitelist: {}", src));
         }
 
         // Duplicate Handling Protocol
@@ -78,14 +97,9 @@ impl SafeFileSystemEngine {
 
         // Phase 1: Register PENDING log entry to SQLite
         if let Ok(conn_lock) = db.conn.lock() {
-            let current_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-
             conn_lock.execute(
-                "INSERT INTO transaction_log (operation_type, source_path, destination_path, timestamp, status) VALUES ('MOVE', ?1, ?2, ?3, 'PENDING')",
-                rusqlite::params![src, final_dest, current_time],
+                "INSERT INTO file_transactions (batch_id, operation_type, source_path, destination_path, status) VALUES (?1, 'MOVE', ?2, ?3, 'PENDING')",
+                params![batch_id, src, final_dest],
             ).map_err(|e| format!("Pre-flight safety ledger write aborted: {}", e))?;
             
             tx_id = conn_lock.last_insert_rowid();
@@ -94,21 +108,24 @@ impl SafeFileSystemEngine {
         // Phase 2: Native OS File Manipulation
         match fs::rename(src_path, &dest_path) {
             Ok(_) => {
-                // Commit complete status
-                if let Ok(conn_lock) = db.conn.lock() {
-                    let _ = conn_lock.execute(
-                        "UPDATE transaction_log SET status = 'COMPLETED' WHERE id = ?1",
-                        rusqlite::params![tx_id],
-                    );
-                    // Dynamically update path map inside file_index table as well
-                    let _ = conn_lock.execute(
-                        "UPDATE file_index SET file_path = ?, file_name = ? WHERE file_path = ?",
-                        rusqlite::params![
-                            final_dest, 
-                            dest_path.file_name().and_then(|n| n.to_str()).unwrap_or(""), 
-                            src
-                        ],
-                    );
+                // Commit complete status via atomic transaction
+                if let Ok(mut conn_lock) = db.conn.lock() {
+                    let tx = conn_lock.transaction().ok();
+                    if let Some(t) = tx {
+                        let _ = t.execute(
+                            "UPDATE file_transactions SET status = 'COMMITTED' WHERE id = ?1",
+                            params![tx_id],
+                        );
+                        let _ = t.execute(
+                            "UPDATE file_index SET file_path = ?, file_name = ? WHERE file_path = ?",
+                            params![
+                                final_dest, 
+                                dest_path.file_name().and_then(|n| n.to_str()).unwrap_or(""), 
+                                src
+                            ],
+                        );
+                        let _ = t.commit();
+                    }
                 }
                 Ok(())
             }
@@ -116,8 +133,8 @@ impl SafeFileSystemEngine {
                 // Flag failure to prevent structural sync bugs
                 if let Ok(conn_lock) = db.conn.lock() {
                     let _ = conn_lock.execute(
-                        "UPDATE transaction_log SET status = 'FAILED' WHERE id = ?1",
-                        rusqlite::params![tx_id],
+                        "UPDATE file_transactions SET status = 'FAILED' WHERE id = ?1",
+                        params![tx_id],
                     );
                 }
                 Err(format!("OS file system migration failure: {}", os_err))
@@ -126,6 +143,66 @@ impl SafeFileSystemEngine {
     }
 
     /// Read transaction logs in reverse to safely return files to their original coordinates
+    pub async fn execute_system_undo(&self, batch_id: String) -> Result<(), String> {
+        let db = DbManager::init(&self.db_path).map_err(|e| e.to_string())?;
+        
+        let transactions: Vec<(i64, String, String, String)> = {
+            let conn_lock = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn_lock.prepare(
+                "SELECT id, operation_type, source_path, destination_path FROM file_transactions 
+                 WHERE batch_id = ?1 AND status = 'COMMITTED' 
+                 ORDER BY id DESC"
+            ).map_err(|e| e.to_string())?;
+            
+            let rows = stmt.query_map(params![batch_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            }).map_err(|e| e.to_string())?;
+            
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        if transactions.is_empty() {
+            return Err(format!("No reversible transactions found for batch ID: {}", batch_id));
+        }
+
+        for (id, _op_type, original_src, original_dest) in transactions {
+            let current_loc = Path::new(&original_dest);
+            let origin_loc = Path::new(&original_src);
+
+            if current_loc.exists() {
+                if let Some(parent) = origin_loc.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent).map_err(|e| format!("Failed to recreate origin folder: {}", e))?;
+                    }
+                }
+                fs::rename(current_loc, origin_loc).map_err(|e| format!("Undo migration failed for {}: {}", original_dest, e))?;
+            }
+
+            // Update database
+            if let Ok(mut conn_lock) = db.conn.lock() {
+                let tx = conn_lock.transaction().ok();
+                if let Some(t) = tx {
+                    let _ = t.execute(
+                        "UPDATE file_transactions SET status = 'ROLLED_BACK' WHERE id = ?1",
+                        params![id],
+                    );
+                    let _ = t.execute(
+                        "UPDATE file_index SET file_path = ?, file_name = ? WHERE file_path = ?",
+                        params![
+                            original_src, 
+                            origin_loc.file_name().and_then(|n| n.to_str()).unwrap_or(""), 
+                            original_dest
+                        ],
+                    );
+                    let _ = t.commit();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Legacy support for single-transaction undo
     pub fn execute_undo_last_transaction(&self) -> Result<String, String> {
         let db = DbManager::init(&self.db_path).map_err(|e| e.to_string())?;
         
@@ -133,15 +210,14 @@ impl SafeFileSystemEngine {
 
         if let Ok(conn_lock) = db.conn.lock() {
             last_tx = conn_lock.query_row(
-                "SELECT id, operation_type, source_path, destination_path FROM transaction_log WHERE status = 'COMPLETED' ORDER BY id DESC LIMIT 1",
-                rusqlite::params![],
+                "SELECT id, operation_type, source_path, destination_path FROM file_transactions WHERE status = 'COMMITTED' ORDER BY id DESC LIMIT 1",
+                params![],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             ).ok();
         }
 
         if let Some((id, op_type, original_src, original_dest)) = last_tx {
             if op_type == "MOVE" {
-                // Reverse coordinates: Move from current location (original_dest) back to origin (original_src)
                 let current_loc = Path::new(&original_dest);
                 let origin_loc = Path::new(&original_src);
 
@@ -151,20 +227,23 @@ impl SafeFileSystemEngine {
 
                 fs::rename(current_loc, origin_loc).map_err(|e| format!("Undo migration sequence failed: {}", e))?;
 
-                // Mark entry as ROLLEDBACK in our security tracking table
-                if let Ok(conn_lock) = db.conn.lock() {
-                    let _ = conn_lock.execute(
-                        "UPDATE transaction_log SET status = 'ROLLEDBACK' WHERE id = ?1",
-                        rusqlite::params![id],
-                    );
-                    let _ = conn_lock.execute(
-                        "UPDATE file_index SET file_path = ?, file_name = ? WHERE file_path = ?",
-                        rusqlite::params![
-                            original_src, 
-                            origin_loc.file_name().and_then(|n| n.to_str()).unwrap_or(""), 
-                            original_dest
-                        ],
-                    );
+                if let Ok(mut conn_lock) = db.conn.lock() {
+                    let tx = conn_lock.transaction().ok();
+                    if let Some(t) = tx {
+                        let _ = t.execute(
+                            "UPDATE file_transactions SET status = 'ROLLED_BACK' WHERE id = ?1",
+                            params![id],
+                        );
+                        let _ = t.execute(
+                            "UPDATE file_index SET file_path = ?, file_name = ? WHERE file_path = ?",
+                            params![
+                                original_src, 
+                                origin_loc.file_name().and_then(|n| n.to_str()).unwrap_or(""), 
+                                original_dest
+                            ],
+                        );
+                        let _ = t.commit();
+                    }
                 }
                 return Ok(format!("Successfully rolled back operation ID {}: File returned to {}", id, original_src));
             }

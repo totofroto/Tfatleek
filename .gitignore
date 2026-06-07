@@ -30,3 +30,20 @@ dist-ssr
 *.db-journal
 .env
 *.dmg
+
+# Local-only secret/vault docs — never track
+home-setup.md
+SKILLS.md
+deleted/
+.env
+**/.env
+__pycache__/
+*.pyc
+
+home-setup.md
+SKILLS.md
+deleted/
+.env
+**/.env
+__pycache__/
+*.pyc

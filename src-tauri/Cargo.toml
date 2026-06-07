@@ -25,4 +25,5 @@ core_engine = { path = "crates/core_engine" }
 crypto_dedup = { path = "crates/crypto_dedup" }
 local_ai = { path = "crates/local_ai" }
 database = { path = "crates/database" }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
