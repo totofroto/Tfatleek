@@ -15,6 +15,21 @@
     - `src/App.tsx`: Main Dashboard with Ingestion, Scan, Batch, and Settings views.
     - `src/components/`: UI Components (Modularized).
     - `src/hooks/`: Custom React hooks for Tauri IPC.
+- **Infrastructure**
+    - **Mac Mini M4 (192.168.254.15)**: 24/7 server
+        - Paperless-ngx (5 containers: webserver, db, broker, gotenberg, tika)
+        - OCR: tessdata_best deu+eng+ara+osd
+        - Ollama qwen3:14b bound to 0.0.0.0:11434
+        - SMB auto-mount via LaunchDaemon (WatchPaths, 9s recovery)
+        - Paperless auto-start via LaunchAgent
+        - PostgreSQL + Redis on local SSD (Docker named volumes)
+        - Data (media, consume) on NAS via SMB
+    - **NAS Asustor (192.168.254.18)**: Storage + watcher + n8n
+        - `tfatleek-watcher` container (supervisord, multi-process)
+        - `watcher.py`, `retry_worker.py`, `health_beacon.py`
+        - `watcher_state.db` (SQLite dedup state)
+        - `manifest.jsonl` (BLAKE3 audit trail)
+        - `watcher_heartbeat.json` (health beacon)
 
 ## 🟢 Current System Status
 - **Phase 1 (Foundations & Dedup): COMPLETE**
@@ -43,20 +58,71 @@
     - Paperless submission enriched with `Tax` and `identified_member` tags derived from AI classification.
     - SMB file-settle debounce and thread-safe deduplication preserved from v1.
     - Local workspace reconciled with live NAS container on 2026-06-06.
+- **Phase M0 (Mac Mini M4 Server Preparation): COMPLETE**
+    - Static IP 192.168.254.15 assigned.
+    - macOS server mode: sleep=0, autorestart=1.
+    - Homebrew, Docker Desktop, wget, jq, htop, watch installed.
+    - SMB mount points created: /Volumes/Docker, /Volumes/Papers.
+    - SSH key from M4 to NAS configured (passwordless, ed25519).
+- **Phase M1 (Paperless-ngx Migration to M4): COMPLETE**
+    - Migrated from NAS → Mac Mini M4 with tessdata_best OCR.
+    - 5 containers: webserver + db + broker + gotenberg + tika.
+    - tessdata_best models: deu + eng + ara + osd.
+    - All data (media, consume) remains on NAS via SMB.
+    - PostgreSQL + Redis on M4 local SSD (Docker named volumes).
+    - LaunchAgent: `com.tfatleek.paperless` (auto-start on boot).
+    - LaunchDaemon: `com.tfatleek.nas-mounts` (SMB auto-remount, WatchPaths triggers remount in 9s on volume loss).
+    - Watcher `PAPERLESS_URL` updated to `http://192.168.254.15:25680`.
+    - 30 documents restored from NAS pg_dump.
+- **Phase G1 (Supervisord Container Hardening): COMPLETE**
+    - supervisord is PID 1 in `tfatleek-watcher` container.
+    - `watcher.py` auto-restarts in ≤10s after any crash.
+    - `supervisorctl status/restart/tail` available for introspection.
+    - Fragile `sh -c` pipe replaced with proper process management.
+- **Phase G2 (Persistent Retry Queue): COMPLETE**
+    - `_pending/` folder in `Tfatleek_Inbox` for failed submissions.
+    - `retry_worker.py` supervised process — scans every 5 minutes.
+    - `watcher.py` wraps `submit_to_paperless()` with `_move_to_pending()`.
+    - Documents never lost on Paperless downtime.
+- **Phase G3 (Persistent SHA256 Dedup State): COMPLETE**
+    - `db_utils.py` created — SQLite helpers for hash-based dedup.
+    - `watcher_state.db` on NAS at `/share/Papers/Tfatleek/watcher_state.db`.
+    - Survives container restarts and rebuilds.
+    - Duplicate stopped before classification (zero wasted AI calls).
+    - In-memory `_processing` set preserved for concurrent thread safety.
+- **Phase G4 (BLAKE3 Manifest Audit Trail): COMPLETE**
+    - `append_to_manifest()` in `watcher.py` writes `manifest.jsonl`.
+    - One JSON line per routed document in taxonomy year folder.
+    - Fields: timestamp, filename, sha256, category, subfolder, correspondent, tax_relevant, identified_member, confidence_score, new_clean_name, ai_engine.
+    - Non-fatal: manifest failure never blocks document routing.
+    - GoBD-relevant chain of custody for German tax documents.
+- **Phase G5 (Health Beacon + 3-Tier AI Fallback): COMPLETE**
+    - `health_beacon.py` supervised process writes heartbeat every 60s.
+    - `watcher_heartbeat.json` at `/share/Papers/Tfatleek/`.
+    - `classify_document()` refactored to explicit 3-tier fallback:
+        - Tier 1: Ollama qwen3:14b on M4 (primary)
+        - Tier 2: Gemini 2.0 Flash Lite (cloud fallback)
+        - Tier 3: Safe unclassified Paperless landing (guaranteed)
+    - `_engine` and `_tier` metadata on every classification result.
+    - Live test: real PDF classified at confidence 0.98 via Tier 1.
+    - Ollama migrated from MacBook Pro M1 → Mac Mini M4.
+    - `OLLAMA_URL` updated to `http://192.168.254.15:11434`.
 
 ## 🏗️ Verified Paperless-ngx Stack (Live)
-- **Containers**: app=PaperlessngxDocker, db=PaperlessngxDB (PostgreSQL), redis=PaperlessngxRedis, tika=PaperlessngxTika, gotenberg=PaperlessngxGotenbg
+- **Host**: Mac Mini M4 (192.168.254.15:25680)
+- **Containers**: webserver + db (PostgreSQL) + broker (Redis) + gotenberg + tika
 - **Active superuser**: totofroto (tarekshek@gmail.com). `plngxadmin` is an install-time bootstrap env var — not a DB user; treat as historical.
 - **Inbox tag**: id=25 ("Inbox"). Tag id=1 is "Mitgliedsbeitrag" (unrelated — never use as inbox).
-- **OCR gap**: Paperless internal OCR_LANGUAGE=`deu+eng`; tfatleek-watcher uses `deu+eng+ara`. Arabic documents processed natively by Paperless will lack Arabic OCR — known gap, no action required unless bulk re-OCR planned.
+- **OCR**: tessdata_best models — deu+eng+ara+osd. Arabic documents are fully processed. Prior gap (NAS-hosted `deu+eng` only) is resolved.
 
 ## 💾 Last Verified Stable State
-- **Current Date**: 2026-06-07
-- **System Stability**: Compiling, Optimized, & Fully Stable.
-- **Verification Result**: 0 Errors, 0 Regressions. `cargo check` passed.
+- **Current Date**: 2026-06-09
+- **System Stability**: Full stack operational and verified.
+- **Verification Result**: G1-G5 + M0-M1 all verified. Live end-to-end pipeline test passed at confidence 0.98 via Tier 1 Ollama on M4.
 - **Security**: No hardcoded tokens in tracked source. `PAPERLESS_TOKEN` supplied via env var.
 
 ## 📝 Recent Changes (Role: Lead Architect)
+- **2026-06-09**: Phases M0, M1, G1-G5 complete — full infrastructure migration and watcher hardening. Mac Mini M4 now hosts Paperless-ngx (tessdata_best) and Ollama qwen3:14b. NAS watcher upgraded to supervisord multi-process architecture with persistent dedup, manifest audit trail, retry queue, health beacon, and 3-tier AI fallback. All data remains on NAS. Live pipeline test passed.
 - **2026-06-06**: Reconciled local workspace to v2 AI-Powered Watcher baseline:
   - **`watcher.py`**: Upgraded from v1 (181 lines, Paperless-only) to v2 (385 lines, full AI pipeline). Live NAS container reported 312 lines; local reconstruction is functionally equivalent — extra lines are structuring and explicit guards.
     - `classify_ollama()` / `classify_gemini()`: mirror the exact JSON schema and system prompt from `local_ai/src/lib.rs` — same fields (`suggested_subfolder`, `category`, `correspondent`, `new_clean_name`, `confidence_score`, `tax_relevant`, `reasoning`, `identified_member`), same `temperature=0.0 / top_p=0.1` options, same `keep_alive=5m`.
@@ -126,3 +192,8 @@
 ## 🪲 Persistent Context Log
 1. **Concurrency Alert**: The frontend view can now securely render instantaneous batch updates safely because the DB writer has zero locking overhead on active readers.
 2. **System Alert**: Be aware that ADM SMB service resets `ntlm auth = no` automatically upon NAS restart. Keep the NTLM fix command ready in your environment.
+3. **Infrastructure**: Mac Mini M4 (192.168.254.15) is the 24/7 compute node. Paperless at :25680, Ollama at :11434. Both auto-start on boot.
+4. **SMB Mounts**: `/Volumes/Docker` and `/Volumes/Papers` on M4 auto-remount via LaunchDaemon WatchPaths — recovers in 9s on network drop.
+5. **Database Location**: PostgreSQL and Redis are on M4 local SSD (Docker named volumes), NOT on NAS SMB — confirmed via `docker volume inspect`.
+6. **Ollama Node**: Ollama is now on M4, not MacBook Pro. MacBook Pro M1 Pro Ollama can be stopped — it is no longer the primary inference node.
+7. **HP Color LaserJet Pro MFP 4302**: Added to home network at 192.168.254.21. Supports Scan-to-SMB. Can feed Tfatleek_Inbox same as Brother ADS-4700W. IP should be made static.
