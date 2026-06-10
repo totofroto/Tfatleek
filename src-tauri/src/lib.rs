@@ -256,6 +256,52 @@ async fn submit_to_paperless_vault(
 }
 
 #[tauri::command]
+async fn get_smart_groups(handle: tauri::AppHandle) -> Result<Vec<database::SmartGroup>, String> {
+    let db_path = get_db_path(&handle);
+    let db = database::DbManager::init(&db_path).map_err(|e| e.to_string())?;
+    db.get_smart_groups().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_smart_group_files(
+    handle: tauri::AppHandle,
+    group_id: i64,
+) -> Result<Vec<database::FileIndexEntry>, String> {
+    let db_path = get_db_path(&handle);
+    let db = database::DbManager::init(&db_path).map_err(|e| e.to_string())?;
+    db.get_smart_group_files(group_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_smart_group(
+    handle: tauri::AppHandle,
+    group: database::NewSmartGroup,
+) -> Result<database::SmartGroup, String> {
+    let db_path = get_db_path(&handle);
+    let db = database::DbManager::init(&db_path).map_err(|e| e.to_string())?;
+    db.create_smart_group(group).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_smart_group(handle: tauri::AppHandle, group_id: i64) -> Result<(), String> {
+    if group_id <= 4 {
+        return Err("Cannot delete built-in groups.".to_string());
+    }
+    let db_path = get_db_path(&handle);
+    let db = database::DbManager::init(&db_path).map_err(|e| e.to_string())?;
+    db.delete_smart_group(group_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_file(path: String) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn update_paperless_settings(
     handle: tauri::AppHandle,
     nas_ip: String,
@@ -294,7 +340,12 @@ pub fn run() {
             remove_excluded_folder,
             index_master_tree,
             submit_to_paperless_vault,
-            update_paperless_settings
+            update_paperless_settings,
+            get_smart_groups,
+            get_smart_group_files,
+            create_smart_group,
+            delete_smart_group,
+            open_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

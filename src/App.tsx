@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import SmartGroupsSidebar from "./components/SmartGroupsSidebar";
+import SmartGroupFileList from "./components/SmartGroupFileList";
 
 interface ScanResult {
   file_path: string;
@@ -50,6 +52,20 @@ interface AppSettings {
   paperless_api_token: string;
 }
 
+interface SmartGroup {
+  id: number;
+  name: string;
+  icon: string;
+  filter_category: string | null;
+  filter_tax_relevant: number | null;
+  filter_year: number | null;
+  filter_correspondent: string | null;
+  filter_min_confidence: number;
+  created_at: string;
+  sort_order: number;
+  file_count: number;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [shortcuts, setShortcuts] = useState<string[]>(['EXCLUSION SETTINGS']);
@@ -75,6 +91,13 @@ export default function App() {
 
   const [settingsSaveStatus, setSettingsSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [settingsSaveError, setSettingsSaveError] = useState("");
+
+  // Smart Groups state
+  const [selectedGroup, setSelectedGroup] = useState<SmartGroup>({
+    id: 1, name: "All Documents", icon: "📄",
+    filter_category: null, filter_tax_relevant: null, filter_year: null,
+    filter_correspondent: null, filter_min_confidence: 0, created_at: "", sort_order: 0, file_count: 0,
+  });
 
   // Settings State
   const [appSettings, setAppSettings] = useState<AppSettings>({
@@ -344,6 +367,7 @@ export default function App() {
         </div>
         <nav className="flex items-center gap-6 border-b border-neutral-900 pb-1">
           <button onClick={() => setActiveTab('dashboard')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'dashboard' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Dashboard</button>
+          <button onClick={() => setActiveTab('smart-groups')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'smart-groups' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Smart Groups</button>
           <button onClick={() => setActiveTab('settings')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'settings' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Settings</button>
           <div className="h-4 w-px bg-neutral-800 mx-2 mb-3"></div>
           {shortcuts.map(id => (
@@ -463,6 +487,20 @@ export default function App() {
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'smart-groups' && (
+          <div className="flex h-[calc(100vh-200px)] rounded-3xl overflow-hidden border border-neutral-800 animate-fade-in">
+            <SmartGroupsSidebar
+              selectedGroupId={selectedGroup.id}
+              onSelect={(group) => setSelectedGroup(group)}
+            />
+            <SmartGroupFileList
+              groupId={selectedGroup.id}
+              groupName={selectedGroup.name}
+              groupIcon={selectedGroup.icon}
+            />
           </div>
         )}
 
