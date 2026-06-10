@@ -19,20 +19,19 @@ services:
       - ./watcher.py:/app/watcher.py:ro
       - /share/Papers/Tfatleek_Inbox:/share/Papers/Tfatleek_Inbox
       - /share/Papers/Tfatleek:/share/Papers/Tfatleek
-    command: >
-      sh -c "echo startup-ok > /share/Papers/Tfatleek/watcher_startup.txt &&
-             python -u /app/watcher.py 2>&1 |
-             tee -a /share/Papers/Tfatleek/watcher.log"
+    command: supervisord -c /etc/supervisord.conf
     environment:
       TFATLEEK_INBOX:       /share/Papers/Tfatleek_Inbox
       TAXONOMY_ROOT:        /share/Papers/Tfatleek
-      PAPERLESS_URL:        http://192.168.254.18:25680
+      PAPERLESS_URL:        http://192.168.254.15:25680
       PAPERLESS_TOKEN:      ${PAPERLESS_TOKEN:?PAPERLESS_TOKEN must be set in .env}
-      PAPERLESS_INBOX_TAG:  "1"
-      OLLAMA_URL:           http://192.168.254.14:11434
+      PAPERLESS_INBOX_TAG:  "25"
+      OLLAMA_URL:           http://192.168.254.15:11434
       OLLAMA_MODEL:         qwen3:14b
       GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
       CONFIDENCE_THRESHOLD: "0.5"
       SETTLE_POLLS:         "6"
       SETTLE_INTERVAL:      "0.5"
       SNIPPET_CHARS:        "2000"
+      WATCHER_STATE_DB:     /share/Papers/Tfatleek/watcher_state.db
+      RULES_PATH:           /share/Papers/Tfatleek/rules.json
