@@ -125,6 +125,14 @@
     - `sha2` crate added for SHA256 hashing.
     - 4 new IPC commands: `list_manifest_files`, `read_manifest`, `verify_manifest_entry`, `export_manifest_csv`.
     - Live test: HP printer manual manifest found at `technical_documents/printer_user_guides/2026`.
+- **Phase H1 (Smart Rules Engine — NAS Watcher): COMPLETE**
+    - `rules_engine.py` created — load/apply/SIGHUP reload logic.
+    - `rules.json` on NAS volume at `/share/Papers/Tfatleek/rules.json` (user-editable without container rebuild).
+    - `apply_rules()` called after AI classification, before routing.
+    - First-match-wins evaluation with 4 default rules: German Tax Documents → Steuer + Tax tag; Medical Records → Medizin + Medical tag; Insurance Documents → Versicherung; Low Confidence Safety Net → _Unsorted + NeedsReview tag.
+    - SIGHUP reload: `supervisorctl signal HUP watcher`.
+    - Extra Paperless tags from rules merged into submission.
+    - All 5 rule test cases passed in-container.
 - **Phase H4 (Watcher Health Dashboard — Tauri UI): COMPLETE**
     - `WatcherHealthDashboard.tsx` — three-panel status dashboard.
     - Live heartbeat status: 🟢 ONLINE / 🟡 STALE / 🔴 OFFLINE.
@@ -145,10 +153,11 @@
 ## 💾 Last Verified Stable State
 - **Current Date**: 2026-06-10
 - **System Stability**: Full stack operational and verified.
-- **Verification Result**: G1-G5 + M0-M1 + H2-H4 all verified. `cargo check` 0 errors. `npm run build` 0 errors. All features verified visually.
+- **Verification Result**: All phases M0/M1/G1-G5/H1-H4 complete and verified. Full stack operational.
 - **Security**: No hardcoded tokens in tracked source. `PAPERLESS_TOKEN` supplied via env var.
 
 ## 📝 Recent Changes (Role: Lead Architect)
+- **2026-06-10**: Phase H1 complete — Smart Rules Engine deployed on NAS watcher. 4 default rules active. SIGHUP reload verified.
 - **2026-06-10**: Phases H2, H3, H4 complete — Smart Groups, Manifest Audit Viewer, and Watcher Health Dashboard added to Tauri desktop app. All verified visually with live data. Commits: H2=4e107dc, H3=5f13d48, H4=1433067.
 - **2026-06-09**: Phases M0, M1, G1-G5 complete — full infrastructure migration and watcher hardening. Mac Mini M4 now hosts Paperless-ngx (tessdata_best) and Ollama qwen3:14b. NAS watcher upgraded to supervisord multi-process architecture with persistent dedup, manifest audit trail, retry queue, health beacon, and 3-tier AI fallback. All data remains on NAS. Live pipeline test passed.
 - **2026-06-06**: Reconciled local workspace to v2 AI-Powered Watcher baseline:
@@ -227,5 +236,4 @@
 7. **HP Color LaserJet Pro MFP 4302**: Added to home network at 192.168.254.21. Supports Scan-to-SMB. Can feed Tfatleek_Inbox same as Brother ADS-4700W. IP should be made static.
 
 ## ⚠️ Open Issues Requiring Attention
-- **H1 (Smart Rules Engine on NAS watcher)** — not yet implemented.
 - **HP Color LaserJet Pro MFP 4302** (192.168.254.21) — SMB scan profile not yet configured.
