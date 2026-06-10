@@ -2,6 +2,165 @@ use serde_json;
 use core_engine;
 use tauri::Manager;
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ManifestEntry {
+    pub timestamp: String,
+    pub filename: String,
+    pub sha256: String,
+    pub category: String,
+    pub subfolder: String,
+    pub correspondent: String,
+    pub tax_relevant: bool,
+    pub identified_member: String,
+    pub confidence_score: f64,
+    pub new_clean_name: String,
+    pub ai_engine: String,
+    #[serde(default)]
+    pub source_path: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct VerifyResult {
+    pub filename: String,
+    pub expected_hash: String,
+    pub actual_hash: String,
+    pub matches: bool,
+    pub file_exists: bool,
+}
+
+fn collect_manifest_files(dir: &std::path::Path, results: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_manifest_files(&path, results);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("manifest.jsonl") {
+            if let Some(s) = path.to_str() {
+                results.push(s.to_string());
+            }
+        }
+    }
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+#[tauri::command]
+fn list_manifest_files(nas_root: String) -> Result<Vec<String>, String> {
+    let root = std::path::Path::new(&nas_root);
+    if !root.exists() {
+        return Ok(vec![]);
+    }
+    let mut results = Vec::new();
+    collect_manifest_files(root, &mut results);
+    results.sort();
+    Ok(results)
+}
+
+#[tauri::command]
+fn read_manifest(manifest_path: String) -> Result<Vec<ManifestEntry>, String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(&manifest_path)
+        .map_err(|e| format!("Failed to open manifest: {}", e))?;
+    let reader = BufReader::new(file);
+    let mut entries: Vec<ManifestEntry> = Vec::new();
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ManifestEntry>(&line) {
+            Ok(mut entry) => {
+                entry.source_path = manifest_path.clone();
+                entries.push(entry);
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping malformed manifest line: {}", e);
+            }
+        }
+    }
+    entries.reverse();
+    Ok(entries)
+}
+
+#[tauri::command]
+fn verify_manifest_entry(
+    manifest_path: String,
+    filename: String,
+    expected_hash: String,
+) -> Result<VerifyResult, String> {
+    use sha2::{Sha256, Digest};
+    use std::io::{Read, BufReader};
+
+    let parent = std::path::Path::new(&manifest_path)
+        .parent()
+        .ok_or_else(|| "Invalid manifest path".to_string())?;
+    let file_path = parent.join(&filename);
+    let file_exists = file_path.exists();
+
+    if !file_exists {
+        return Ok(VerifyResult {
+            filename,
+            expected_hash,
+            actual_hash: String::new(),
+            matches: false,
+            file_exists: false,
+        });
+    }
+
+    let file = std::fs::File::open(&file_path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    let actual_hash = format!("{:x}", hasher.finalize());
+    let matches = actual_hash.to_lowercase() == expected_hash.to_lowercase();
+
+    Ok(VerifyResult {
+        filename,
+        expected_hash,
+        actual_hash,
+        matches,
+        file_exists: true,
+    })
+}
+
+#[tauri::command]
+fn export_manifest_csv(manifest_path: String) -> Result<String, String> {
+    let entries = read_manifest(manifest_path)?;
+    let mut csv = String::from(
+        "timestamp,filename,sha256,category,subfolder,correspondent,tax_relevant,identified_member,confidence_score,new_clean_name,ai_engine\n",
+    );
+    for e in entries {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{:.4},{},{}\n",
+            csv_escape(&e.timestamp),
+            csv_escape(&e.filename),
+            csv_escape(&e.sha256),
+            csv_escape(&e.category),
+            csv_escape(&e.subfolder),
+            csv_escape(&e.correspondent),
+            e.tax_relevant,
+            csv_escape(&e.identified_member),
+            e.confidence_score,
+            csv_escape(&e.new_clean_name),
+            csv_escape(&e.ai_engine),
+        ));
+    }
+    Ok(csv)
+}
+
 fn get_db_path(handle: &tauri::AppHandle) -> String {
     let app_local_data = handle.path().app_local_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     std::fs::create_dir_all(&app_local_data).ok();
@@ -322,6 +481,7 @@ async fn update_paperless_settings(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             start_dedup_scan,
             classify_file_with_ai,
@@ -345,7 +505,11 @@ pub fn run() {
             get_smart_group_files,
             create_smart_group,
             delete_smart_group,
-            open_file
+            open_file,
+            list_manifest_files,
+            read_manifest,
+            verify_manifest_entry,
+            export_manifest_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

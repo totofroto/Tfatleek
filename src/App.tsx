@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import SmartGroupsSidebar from "./components/SmartGroupsSidebar";
 import SmartGroupFileList from "./components/SmartGroupFileList";
+import ManifestViewer from "./components/ManifestViewer";
 
 interface ScanResult {
   file_path: string;
@@ -369,6 +370,7 @@ export default function App() {
           <button onClick={() => setActiveTab('dashboard')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'dashboard' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Dashboard</button>
           <button onClick={() => setActiveTab('smart-groups')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'smart-groups' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Smart Groups</button>
           <button onClick={() => setActiveTab('settings')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'settings' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Settings</button>
+          <button onClick={() => setActiveTab('audit-trail')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'audit-trail' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Audit Trail</button>
           <div className="h-4 w-px bg-neutral-800 mx-2 mb-3"></div>
           {shortcuts.map(id => (
             <div key={id} className="flex items-center gap-1 group pb-3">
@@ -501,6 +503,12 @@ export default function App() {
               groupName={selectedGroup.name}
               groupIcon={selectedGroup.icon}
             />
+          </div>
+        )}
+
+        {activeTab === 'audit-trail' && (
+          <div className="animate-fade-in">
+            <ManifestViewer />
           </div>
         )}
 
