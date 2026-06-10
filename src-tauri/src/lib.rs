@@ -136,6 +136,104 @@ fn verify_manifest_entry(
     })
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct WatcherHealth {
+    pub status: String,
+    pub timestamp: String,
+    pub seconds_ago: i64,
+    pub pid: Option<i64>,
+    pub file_exists: bool,
+    pub interval_seconds: Option<i64>,
+}
+
+#[tauri::command]
+fn get_watcher_health(heartbeat_path: String) -> Result<WatcherHealth, String> {
+    use chrono::{DateTime, Utc};
+
+    let path = std::path::Path::new(&heartbeat_path);
+    if !path.exists() {
+        return Ok(WatcherHealth {
+            status: "unreachable".to_string(),
+            timestamp: String::new(),
+            seconds_ago: -1,
+            pid: None,
+            file_exists: false,
+            interval_seconds: None,
+        });
+    }
+
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read heartbeat: {}", e))?;
+    let heartbeat: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| format!("Failed to parse heartbeat: {}", e))?;
+
+    let timestamp_str = heartbeat["timestamp"].as_str().unwrap_or("").to_string();
+    let pid = heartbeat["pid"].as_i64();
+    let interval_seconds = heartbeat["interval_seconds"].as_i64();
+
+    let seconds_ago = if !timestamp_str.is_empty() {
+        match DateTime::parse_from_rfc3339(&timestamp_str) {
+            Ok(dt) => {
+                let now = Utc::now();
+                let hb_utc: DateTime<Utc> = dt.into();
+                (now - hb_utc).num_seconds()
+            }
+            Err(_) => -1,
+        }
+    } else {
+        -1
+    };
+
+    let status = if seconds_ago < 0 {
+        "unreachable".to_string()
+    } else if seconds_ago < 120 {
+        "alive".to_string()
+    } else if seconds_ago < 600 {
+        "stale".to_string()
+    } else {
+        "unreachable".to_string()
+    };
+
+    Ok(WatcherHealth {
+        status,
+        timestamp: timestamp_str,
+        seconds_ago,
+        pid,
+        file_exists: true,
+        interval_seconds,
+    })
+}
+
+#[tauri::command]
+fn get_watcher_log_tail(log_path: String, lines: usize) -> Result<Vec<String>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = std::path::Path::new(&log_path);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open log: {}", e))?;
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let read_size: u64 = 32768u64.min(file_size);
+
+    if read_size == 0 {
+        return Ok(vec![]);
+    }
+
+    file.seek(SeekFrom::End(-(read_size as i64)))
+        .map_err(|e| e.to_string())?;
+
+    let mut buf = Vec::with_capacity(read_size as usize);
+    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+
+    let content = String::from_utf8_lossy(&buf);
+    let all_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let start = all_lines.len().saturating_sub(lines);
+    Ok(all_lines[start..].to_vec())
+}
+
 #[tauri::command]
 fn export_manifest_csv(manifest_path: String) -> Result<String, String> {
     let entries = read_manifest(manifest_path)?;
@@ -509,7 +607,9 @@ pub fn run() {
             list_manifest_files,
             read_manifest,
             verify_manifest_entry,
-            export_manifest_csv
+            export_manifest_csv,
+            get_watcher_health,
+            get_watcher_log_tail
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

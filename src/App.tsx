@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import SmartGroupsSidebar from "./components/SmartGroupsSidebar";
 import SmartGroupFileList from "./components/SmartGroupFileList";
 import ManifestViewer from "./components/ManifestViewer";
+import WatcherHealthDashboard from "./components/WatcherHealthDashboard";
 
 interface ScanResult {
   file_path: string;
@@ -100,6 +101,9 @@ export default function App() {
     filter_correspondent: null, filter_min_confidence: 0, created_at: "", sort_order: 0, file_count: 0,
   });
 
+  // Watcher health badge (polled every 60s)
+  const [watcherStatus, setWatcherStatus] = useState<"alive" | "stale" | "unreachable" | null>(null);
+
   // Settings State
   const [appSettings, setAppSettings] = useState<AppSettings>({
     preset_paths: {},
@@ -159,6 +163,23 @@ export default function App() {
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
     };
+  }, []);
+
+  useEffect(() => {
+    const HEARTBEAT = "/Volumes/Papers/Tfatleek/watcher_heartbeat.json";
+    const poll = async () => {
+      try {
+        const h = await invoke<{ status: string }>("get_watcher_health", {
+          heartbeatPath: HEARTBEAT,
+        });
+        setWatcherStatus(h.status as "alive" | "stale" | "unreachable");
+      } catch {
+        setWatcherStatus("unreachable");
+      }
+    };
+    poll();
+    const t = setInterval(poll, 60000);
+    return () => clearInterval(t);
   }, []);
 
   const handleDroppedIngestion = async (filePath: string) => {
@@ -371,6 +392,7 @@ export default function App() {
           <button onClick={() => setActiveTab('smart-groups')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'smart-groups' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Smart Groups</button>
           <button onClick={() => setActiveTab('settings')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'settings' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Settings</button>
           <button onClick={() => setActiveTab('audit-trail')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'audit-trail' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Audit Trail</button>
+          <button onClick={() => setActiveTab('pipeline')} className={`pb-3 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === 'pipeline' ? 'text-blue-500 border-blue-500' : 'text-neutral-600 border-transparent'}`}>Pipeline</button>
           <div className="h-4 w-px bg-neutral-800 mx-2 mb-3"></div>
           {shortcuts.map(id => (
             <div key={id} className="flex items-center gap-1 group pb-3">
@@ -381,6 +403,26 @@ export default function App() {
             </div>
           ))}
           <button onClick={() => setActiveTab('settings')} className="pb-3 text-[10px] font-black text-neutral-700 hover:text-blue-500 mb-1 transition-colors">[+] PIN SHORTCUT</button>
+          <button
+            onClick={() => setActiveTab('pipeline')}
+            className="ml-auto pb-3 flex items-center gap-1.5 group"
+            title="Pipeline health"
+          >
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+              watcherStatus === 'alive' ? 'bg-emerald-500' :
+              watcherStatus === 'stale' ? 'bg-yellow-500' :
+              watcherStatus === null ? 'bg-neutral-600 animate-pulse' :
+              'bg-red-500'
+            }`} />
+            <span className={`text-[10px] font-black uppercase tracking-widest transition-colors ${
+              watcherStatus === 'alive' ? 'text-emerald-600 group-hover:text-emerald-400' :
+              watcherStatus === 'stale' ? 'text-yellow-600 group-hover:text-yellow-400' :
+              watcherStatus === null ? 'text-neutral-700' :
+              'text-red-700 group-hover:text-red-500'
+            }`}>
+              {watcherStatus === 'alive' ? 'ONLINE' : watcherStatus === 'stale' ? 'STALE' : watcherStatus === null ? '...' : 'OFFLINE'}
+            </span>
+          </button>
         </nav>
       </header>
 
@@ -509,6 +551,14 @@ export default function App() {
         {activeTab === 'audit-trail' && (
           <div className="animate-fade-in">
             <ManifestViewer />
+          </div>
+        )}
+
+        {activeTab === 'pipeline' && (
+          <div className="animate-fade-in">
+            <WatcherHealthDashboard
+              heartbeatPath="/Volumes/Papers/Tfatleek/watcher_heartbeat.json"
+            />
           </div>
         )}
 
