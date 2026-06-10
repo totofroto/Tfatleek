@@ -107,6 +107,33 @@
     - Live test: real PDF classified at confidence 0.98 via Tier 1.
     - Ollama migrated from MacBook Pro M1 → Mac Mini M4.
     - `OLLAMA_URL` updated to `http://192.168.254.15:11434`.
+- **Phase H2 (Smart Groups — Tauri UI): COMPLETE**
+    - `smart_groups` SQLite table with 4 default groups.
+    - Dynamic file queries via LEFT JOIN on `file_index` + `ai_metadata`.
+    - `SmartGroupsSidebar.tsx` — list, create modal, lock/delete controls.
+    - `SmartGroupFileList.tsx` — sortable table, confidence color-coding, tax badge, click-to-open.
+    - 4 new IPC commands: `get_smart_groups`, `get_smart_group_files`, `create_smart_group`, `delete_smart_group`.
+    - Default groups: All Documents, Tax Documents, Medical Records, Unsorted.
+    - User groups fully deletable; default groups locked (id ≤ 4 protected).
+- **Phase H3 (Manifest Audit Viewer — Tauri UI): COMPLETE**
+    - `ManifestViewer.tsx` — two-panel layout (manifest tree + entries table).
+    - Native folder picker via `tauri-plugin-dialog`.
+    - NAS root persisted to `localStorage`.
+    - Discovers all `manifest.jsonl` files recursively under NAS root.
+    - Per-entry integrity verification: re-hashes physical file with SHA256 → ✅ INTACT / ❌ TAMPERED / ❌ MISSING badges.
+    - Export to CSV per manifest file.
+    - `sha2` crate added for SHA256 hashing.
+    - 4 new IPC commands: `list_manifest_files`, `read_manifest`, `verify_manifest_entry`, `export_manifest_csv`.
+    - Live test: HP printer manual manifest found at `technical_documents/printer_user_guides/2026`.
+- **Phase H4 (Watcher Health Dashboard — Tauri UI): COMPLETE**
+    - `WatcherHealthDashboard.tsx` — three-panel status dashboard.
+    - Live heartbeat status: 🟢 ONLINE / 🟡 STALE / 🔴 OFFLINE.
+    - Pipeline status cards: Paperless-ngx + Ollama live HTTP probes.
+    - Color-coded log tail (30 lines): ERROR=red, WARN=yellow, DEDUP=blue, MANIFEST=purple, SAFE_LANDING=orange, RETRY=orange.
+    - Auto-refresh every 30s + manual refresh button.
+    - Compact ● ONLINE/STALE/OFFLINE badge in nav bar (60s poll).
+    - `chrono` crate added for timestamp parsing.
+    - 2 new IPC commands: `get_watcher_health`, `get_watcher_log_tail`.
 
 ## 🏗️ Verified Paperless-ngx Stack (Live)
 - **Host**: Mac Mini M4 (192.168.254.15:25680)
@@ -116,12 +143,13 @@
 - **OCR**: tessdata_best models — deu+eng+ara+osd. Arabic documents are fully processed. Prior gap (NAS-hosted `deu+eng` only) is resolved.
 
 ## 💾 Last Verified Stable State
-- **Current Date**: 2026-06-09
+- **Current Date**: 2026-06-10
 - **System Stability**: Full stack operational and verified.
-- **Verification Result**: G1-G5 + M0-M1 all verified. Live end-to-end pipeline test passed at confidence 0.98 via Tier 1 Ollama on M4.
+- **Verification Result**: G1-G5 + M0-M1 + H2-H4 all verified. `cargo check` 0 errors. `npm run build` 0 errors. All features verified visually.
 - **Security**: No hardcoded tokens in tracked source. `PAPERLESS_TOKEN` supplied via env var.
 
 ## 📝 Recent Changes (Role: Lead Architect)
+- **2026-06-10**: Phases H2, H3, H4 complete — Smart Groups, Manifest Audit Viewer, and Watcher Health Dashboard added to Tauri desktop app. All verified visually with live data. Commits: H2=4e107dc, H3=5f13d48, H4=1433067.
 - **2026-06-09**: Phases M0, M1, G1-G5 complete — full infrastructure migration and watcher hardening. Mac Mini M4 now hosts Paperless-ngx (tessdata_best) and Ollama qwen3:14b. NAS watcher upgraded to supervisord multi-process architecture with persistent dedup, manifest audit trail, retry queue, health beacon, and 3-tier AI fallback. All data remains on NAS. Live pipeline test passed.
 - **2026-06-06**: Reconciled local workspace to v2 AI-Powered Watcher baseline:
   - **`watcher.py`**: Upgraded from v1 (181 lines, Paperless-only) to v2 (385 lines, full AI pipeline). Live NAS container reported 312 lines; local reconstruction is functionally equivalent — extra lines are structuring and explicit guards.
@@ -197,3 +225,7 @@
 5. **Database Location**: PostgreSQL and Redis are on M4 local SSD (Docker named volumes), NOT on NAS SMB — confirmed via `docker volume inspect`.
 6. **Ollama Node**: Ollama is now on M4, not MacBook Pro. MacBook Pro M1 Pro Ollama can be stopped — it is no longer the primary inference node.
 7. **HP Color LaserJet Pro MFP 4302**: Added to home network at 192.168.254.21. Supports Scan-to-SMB. Can feed Tfatleek_Inbox same as Brother ADS-4700W. IP should be made static.
+
+## ⚠️ Open Issues Requiring Attention
+- **H1 (Smart Rules Engine on NAS watcher)** — not yet implemented.
+- **HP Color LaserJet Pro MFP 4302** (192.168.254.21) — SMB scan profile not yet configured.
