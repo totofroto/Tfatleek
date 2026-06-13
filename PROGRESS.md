@@ -154,6 +154,11 @@ status: active
     - Compact ● ONLINE/STALE/OFFLINE badge in nav bar (60s poll).
     - `chrono` crate added for timestamp parsing.
     - 2 new IPC commands: `get_watcher_health`, `get_watcher_log_tail`.
+- **Phase M2 (M4 Pipeline Stabilization & n8n Debugging): COMPLETE**
+- **SMB Cache Bug Resolved:** Fixed NotADirectoryError (Errno 20) on the Mac Mini M4. The macOS kernel aggressively cached the NAS /thumbnails folder as a flat file. Fixed via Mac Mini reboot, flushing the SMB cache and cleanly remounting via com.tfatleek.nas-mounts.
+- **n8n Loop Processing Fixed:** Patched the n8n SQLite database to correctly iterate over arrays instead of using .first(). n8n now successfully processes batches of documents sequentially without overwriting the first ID.
+- **JSON & Authentication Hardened:** Injected the correct M4 Paperless API Token into the HTTP request headers to bypass the Django login screen. Replaced raw JSON strings with native JS objects to safely escape invisible newline characters.
+- **Result:** 17 documents successfully processed end-to-end; 3 unreadable documents correctly routed to the Unsorted safety net. Pipeline is 100% autonomous.
 
 ## 🏗️ Verified Paperless-ngx Stack (Live)
 - **Host**: Mac Mini M4 (192.168.254.15:25680)
