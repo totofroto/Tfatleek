@@ -142,7 +142,7 @@ Before proposing major changes, the Coordinator AI should:
 
 ## 8. Documentation Policy
 
-When project documentation exists:
+When project documentation exists (such as [[PROGRESS.md]], [[SKILLS.md]], and [[home-setup.md]]):
 
 - Documentation should be updated alongside code changes.
 - Significant architectural decisions should be recorded.

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::collections::HashMap;
 use reqwest::multipart;
 use serde::{Serialize, Deserialize};
 use tokio_util::io::ReaderStream;
@@ -188,4 +189,87 @@ pub async fn upload_to_paperless(
         let body = response.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
         Err(format!("Paperless API error ({}): {}", status, body))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModifiedDocument {
+    pub file_name: String,
+    pub correspondent: Option<String>,
+    pub created_date: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct PaperlessCorrespondent {
+    id: i64,
+    name: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct PaperlessCorrespondentsResponse {
+    results: Vec<PaperlessCorrespondent>,
+}
+
+#[derive(Deserialize, Debug)]
+struct PaperlessDocument {
+    title: String,
+    correspondent: Option<i64>,
+    created: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct PaperlessDocumentsResponse {
+    results: Vec<PaperlessDocument>,
+}
+
+pub async fn fetch_modified_documents(last_sync: &str) -> Result<Vec<ModifiedDocument>, String> {
+    let auth_token = std::env::var("PAPERLESS_TOKEN")
+        .map_err(|_| "PAPERLESS_TOKEN environment variable is not set".to_string())?;
+
+    let client = reqwest::Client::new();
+    let base_url = "http://192.168.254.15:25680";
+
+    // 1. Fetch all correspondents to build id->name map
+    let corr_url = format!("{}/api/correspondents/?page_size=1000", base_url);
+    let mut correspondents_map = HashMap::new();
+    if let Ok(resp) = client
+        .get(&corr_url)
+        .header("Authorization", format!("Token {}", auth_token))
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(data) = resp.json::<PaperlessCorrespondentsResponse>().await {
+                for c in data.results {
+                    correspondents_map.insert(c.id, c.name);
+                }
+            }
+        }
+    }
+
+    // 2. Fetch modified documents
+    let docs_url = format!("{}/api/documents/?modified__gt={}&page_size=100", base_url, last_sync);
+    let resp = client
+        .get(&docs_url)
+        .header("Authorization", format!("Token {}", auth_token))
+        .send()
+        .await
+        .map_err(|e| format!("Network error fetching modified documents: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Paperless API error: {}", resp.status()));
+    }
+
+    let data = resp.json::<PaperlessDocumentsResponse>().await
+        .map_err(|e| format!("Failed to parse paperless response: {}", e))?;
+
+    let results = data.results.into_iter().map(|doc| {
+        let corr_name = doc.correspondent.and_then(|id| correspondents_map.get(&id).cloned());
+        ModifiedDocument {
+            file_name: doc.title,
+            correspondent: corr_name,
+            created_date: doc.created,
+        }
+    }).collect();
+
+    Ok(results)
 }

@@ -4508,6 +4508,7 @@ dependencies = [
  "crypto_dedup",
  "database",
  "local_ai",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",

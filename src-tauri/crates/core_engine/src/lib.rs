@@ -113,7 +113,9 @@ pub async fn execute_batch_organization<R: tauri::Runtime>(
     db_path: &str,
 ) -> Result<String, String> {
     let target_lower = root_scan_path.to_lowercase();
-    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" || target_lower == "/" {
+    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" ||
+       target_lower == "/users/taregshek/desktop" || target_lower == "/users/taregshek/documents" ||
+       target_lower == "/" {
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
 
@@ -328,8 +330,8 @@ pub async fn run_ai_classification(
     //    ensuring a re-scanned file at the same path always forces re-classification.
     let db = DbManager::init(db_path).map_err(|e| format!("DB Access Fault: {}", e))?;
     if let Ok(conn_lock) = db.conn.lock() {
-        let cached_result: Option<(String, String, String, f32, bool, Option<String>)> = conn_lock.query_row(
-            "SELECT am.suggested_subfolder, am.category, am.correspondent, am.confidence_score, am.tax_relevant, am.identified_member
+        let cached_result: Option<(String, String, String, f32, bool, Option<String>, Option<String>, Option<String>)> = conn_lock.query_row(
+            "SELECT am.suggested_subfolder, am.category, am.correspondent, am.confidence_score, am.tax_relevant, am.identified_member, am.monetary_amount, am.document_date
              FROM ai_metadata am
              JOIN file_index fi ON fi.id = am.file_id
              WHERE fi.file_path = ?1
@@ -337,10 +339,19 @@ pub async fn run_ai_classification(
                AND am.ai_processed_at IS NOT NULL
                AND am.ai_processed_at >= fi.modified_at",
             rusqlite::params![file_path],
-            |row| Ok((row.get(0)?, row.get(1).unwrap_or_default(), row.get(2).unwrap_or_default(), row.get(3)?, row.get::<_, i32>(4)? != 0, row.get(5)?))
+            |row| Ok((
+                row.get(0)?,
+                row.get(1).unwrap_or_default(),
+                row.get(2).unwrap_or_default(),
+                row.get(3)?,
+                row.get::<_, i32>(4)? != 0,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?
+            ))
         ).ok();
 
-        if let Some((subfolder, category, correspondent, confidence, tax_rel, member)) = cached_result {
+        if let Some((subfolder, category, correspondent, confidence, tax_rel, member, monetary, doc_date)) = cached_result {
             return Ok(AiClassificationResult {
                 suggested_subfolder: subfolder,
                 category,
@@ -350,6 +361,8 @@ pub async fn run_ai_classification(
                 reasoning: "Active cache hit: Skipping inference".to_string(),
                 tax_relevant: tax_rel,
                 identified_member: member,
+                monetary_amount: monetary,
+                document_date: doc_date,
             });
         }
     }
@@ -413,7 +426,7 @@ pub async fn run_ai_classification(
             let mut conn = conn_lock;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
-                "INSERT OR REPLACE INTO ai_metadata (file_id, extracted_text, suggested_subfolder, category, correspondent, confidence_score, tax_relevant, identified_member, ai_processed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR REPLACE INTO ai_metadata (file_id, extracted_text, suggested_subfolder, category, correspondent, confidence_score, tax_relevant, identified_member, monetary_amount, document_date, ai_processed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     id,
                     snippet,
@@ -423,6 +436,8 @@ pub async fn run_ai_classification(
                     ai_result.confidence_score,
                     if ai_result.tax_relevant { 1 } else { 0 },
                     ai_result.identified_member,
+                    ai_result.monetary_amount,
+                    ai_result.document_date,
                     current_time
                 ],
             ).map_err(|e| e.to_string())?;
@@ -631,6 +646,8 @@ pub async fn reconcile_and_prune_source(
     // Check 1 (Guardrails): Verify root restrictions and protected directories
     if target_lower == "/users/taregahmed/desktop" || 
        target_lower == "/users/taregahmed/documents" || 
+       target_lower == "/users/taregshek/desktop" || 
+       target_lower == "/users/taregshek/documents" || 
        target_lower == "/" {
         return Err("Safety Lock: Reconciliation attempted on protected system root or user profile directory.".to_string());
     }
@@ -680,7 +697,9 @@ pub async fn reconcile_and_prune_source(
 
 pub async fn query_contextual_memory_match<R: tauri::Runtime>(app_handle: tauri::AppHandle<R>, incoming_path: String) -> Result<Option<String>, String> {
     let target_lower = incoming_path.to_lowercase();
-    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" || target_lower == "/" {
+    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" ||
+       target_lower == "/users/taregshek/desktop" || target_lower == "/users/taregshek/documents" ||
+       target_lower == "/" {
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
 

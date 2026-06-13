@@ -15,6 +15,8 @@ from pathlib import Path
 import requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from db_utils import compute_hash, is_already_processed, mark_processed
+from rules_engine import load_rules, apply_rules, setup_sighup_reload
 
 # ---------------------------------------------------------------------------
 # Configuration — all values overridable via docker-compose environment
@@ -22,11 +24,11 @@ from watchdog.events import FileSystemEventHandler
 
 INBOX_PATH          = os.environ.get("TFATLEEK_INBOX",       "/share/Papers/Tfatleek_Inbox")
 TAXONOMY_ROOT       = os.environ.get("TAXONOMY_ROOT",         "/share/Papers/Tfatleek")
-PAPERLESS_URL       = os.environ.get("PAPERLESS_URL",         "http://192.168.254.18:25680")
+PAPERLESS_URL       = os.environ.get("PAPERLESS_URL",         "http://192.168.254.15:25680")
 PAPERLESS_TOKEN     = os.environ.get("PAPERLESS_TOKEN",       "").strip()
 PAPERLESS_INBOX_TAG = int(os.environ.get("PAPERLESS_INBOX_TAG", "25"))
 
-OLLAMA_URL          = os.environ.get("OLLAMA_URL",            "http://192.168.254.14:11434")
+OLLAMA_URL          = os.environ.get("OLLAMA_URL",            "http://192.168.254.15:11434")
 OLLAMA_MODEL        = os.environ.get("OLLAMA_MODEL",          "qwen3:14b")
 GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY",        "")
 
@@ -151,6 +153,8 @@ _SYSTEM_PROMPT = (
     "Also check if the content mentions any family members: Tareg Mohamed Ahmed Shek (Father), "
     "Miluda Bashir Shek (Mother), Fatima Shek (Daughter), or Sama Shek (Daughter). "
     "If a clear match is found, return their full name in 'identified_member'. "
+    "Extract any invoice totals, bill amounts, salary statements, or transaction fees as a string containing the number and currency symbol (e.g., '145.50 €') in 'monetary_amount' (return null if none). "
+    "Extract the explicit date printed on the letter or invoice in ISO 8601 string format (YYYY-MM-DD) in 'document_date' (do not return the current system date; parse the document text strictly, return null if unreadable). "
     "Return your answer strictly within the JSON schema constraint."
 )
 
@@ -165,9 +169,12 @@ _OLLAMA_FORMAT = {
         "tax_relevant":        {"type": "boolean"},
         "reasoning":           {"type": "string"},
         "identified_member":   {"type": ["string", "null"]},
+        "monetary_amount":     {"type": ["string", "null"]},
+        "document_date":       {"type": ["string", "null"]},
     },
     "required": ["suggested_subfolder", "category", "correspondent", "new_clean_name",
-                 "confidence_score", "tax_relevant", "reasoning", "identified_member"],
+                 "confidence_score", "tax_relevant", "reasoning", "identified_member",
+                 "monetary_amount", "document_date"],
 }
 
 
@@ -211,7 +218,9 @@ def classify_gemini(path: str, snippet: str) -> dict | None:
         "You are Tfatleek's backend filing clerk. Return a JSON object with: "
         "suggested_subfolder (string, snake_case), category (string), correspondent (string), "
         "new_clean_name (string), confidence_score (number 0.0–1.0), tax_relevant (boolean), "
-        "reasoning (string), identified_member (string or null).\n\n"
+        "reasoning (string), identified_member (string or null), "
+        "monetary_amount (string or null, e.g. '145.50 €'), "
+        "document_date (string or null, ISO 8601 YYYY-MM-DD).\n\n"
         "Family members: Tareg Mohamed Ahmed Shek (Father), Miluda Bashir Shek (Mother), "
         "Fatima Shek (Daughter), Sama Shek (Daughter).\n\n"
         f"{_user_content(path, snippet)}\n\nReturn ONLY the raw JSON object."
@@ -234,15 +243,92 @@ def classify_gemini(path: str, snippet: str) -> dict | None:
         return None
 
 
-def classify(path: str) -> dict | None:
-    snippet = extract_snippet(path)
-    result = classify_ollama(path, snippet)
-    return result if result is not None else classify_gemini(path, snippet)
+def classify_document(filepath: str, snippet: str) -> dict:
+    """3-tier fallback: Ollama → Gemini → safe landing. Always returns a dict."""
+    # TIER 1: Ollama (primary, local, private)
+    result = classify_ollama(filepath, snippet)
+    if result is not None:
+        if result.get("confidence_score", 0) >= CONFIDENCE_THRESHOLD:
+            result["_engine"] = "ollama"
+            result["_tier"] = 1
+            return result
+        else:
+            log.warning("CLASSIFY: Ollama low confidence (%.2f) → Gemini",
+                        result.get("confidence_score", 0))
+    else:
+        log.warning("CLASSIFY: Ollama unavailable → Gemini")
+
+    # TIER 2: Gemini (cloud fallback)
+    if GEMINI_API_KEY:
+        result = classify_gemini(filepath, snippet)
+        if result is not None:
+            if result.get("confidence_score", 0) >= CONFIDENCE_THRESHOLD:
+                result["_engine"] = "gemini"
+                result["_tier"] = 2
+                return result
+            else:
+                log.warning("CLASSIFY: Gemini low confidence (%.2f) → safe landing",
+                            result.get("confidence_score", 0))
+        else:
+            log.warning("CLASSIFY: Gemini failed → safe landing")
+    else:
+        log.warning("CLASSIFY: No GEMINI_API_KEY → safe landing")
+
+    # TIER 3: Safe landing (GUARANTEED — document never lost)
+    log.warning("CLASSIFY: Both engines failed — safe unclassified landing")
+    return {
+        "category": "_Unsorted",
+        "suggested_subfolder": "_Unsorted",
+        "correspondent": "",
+        "new_clean_name": os.path.basename(filepath),
+        "confidence_score": 0.0,
+        "tax_relevant": False,
+        "identified_member": "",
+        "monetary_amount": None,
+        "document_date": None,
+        "reasoning": "Both AI engines failed or returned low confidence.",
+        "_engine": "none",
+        "_tier": 3,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Taxonomy routing
 # ---------------------------------------------------------------------------
+
+def append_to_manifest(dest_folder: str, filename: str,
+                       filepath: str, classification: dict):
+    import json, hashlib
+    from datetime import datetime, timezone
+    manifest_path = os.path.join(dest_folder, "manifest.jsonl")
+    try:
+        h = hashlib.sha256()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        file_hash = h.hexdigest()
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "filename": filename,
+            "sha256": file_hash,
+            "category": classification.get("category", ""),
+            "subfolder": classification.get("suggested_subfolder", ""),
+            "correspondent": classification.get("correspondent", ""),
+            "tax_relevant": classification.get("tax_relevant", False),
+            "identified_member": classification.get("identified_member", ""),
+            "monetary_amount": classification.get("monetary_amount", None),
+            "document_date": classification.get("document_date", None),
+            "confidence_score": classification.get("confidence_score", 0.0),
+            "new_clean_name": classification.get("new_clean_name", filename),
+            "ai_engine": classification.get("_engine", "unknown"),
+        }
+        with open(manifest_path, "a", encoding="utf-8") as mf:
+            mf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        logging.info("MANIFEST: Logged %s → %s", filename, manifest_path)
+    except Exception as e:
+        logging.warning("MANIFEST: Failed to write for %s: %s", filename, e)
+        # Non-fatal — never block routing due to manifest failure
+
 
 def route_to_taxonomy(path: str, c: dict) -> str | None:
     """Move file into taxonomy tree when confidence >= threshold. Returns dest path."""
@@ -275,6 +361,7 @@ def route_to_taxonomy(path: str, c: dict) -> str | None:
         log.error("Source file gone before taxonomy move (race with another consumer?): %s", path)
         return None
 
+    append_to_manifest(str(dest_dir), dest.name, str(dest), c)
     log.info("Routed (score=%.2f) → %s", score, dest)
     return str(dest)
 
@@ -323,6 +410,9 @@ def submit_to_paperless(path: str, c: dict | None = None) -> bool:
         if member:
             extra_tags.append(member)
         title = (c.get("new_clean_name") or name).strip() or name
+        rule_tags = c.get("_extra_tags", [])
+        if rule_tags:
+            extra_tags = list(set(extra_tags + rule_tags))
 
     tag_ids = _resolve_tag_ids(headers, extra_tags)
 
@@ -347,34 +437,95 @@ def submit_to_paperless(path: str, c: dict | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Retry queue
+# ---------------------------------------------------------------------------
+
+def _move_to_pending(current_path: str, reason: str) -> None:
+    """Move a file to _pending/ when Paperless submission fails."""
+    pending_dir = Path(INBOX_PATH) / "_pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(current_path).name
+    dest = pending_dir / name
+    if dest.exists():
+        dest = pending_dir / f"{Path(name).stem}_{int(time.time())}{Path(name).suffix}"
+    try:
+        shutil.move(current_path, str(dest))
+        log.warning("RETRY_QUEUE: %s moved to _pending due to: %s", name, reason)
+    except Exception as e:
+        log.error("RETRY_QUEUE: failed to move %s to _pending: %s", name, e)
+
+
+# ---------------------------------------------------------------------------
 # Processing pipeline
 # ---------------------------------------------------------------------------
+
+def copy_to_output(path: str, c: dict) -> None:
+    try:
+        score = c.get("confidence_score", 0.0)
+        rule_matched = c.get("_rule_matched")
+        
+        force_subfolder = "_Unsorted"
+        if rule_matched and score >= CONFIDENCE_THRESHOLD:
+            force_subfolder = c.get("suggested_subfolder") or "_Unsorted"
+            
+        dest_dir = os.path.join("/share/Papers/Tfatleek_Output", force_subfolder)
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        orig_ext = Path(path).suffix
+        raw_name = (c.get("new_clean_name") or "").strip()
+        if raw_name and not Path(raw_name).suffix and orig_ext:
+            raw_name = raw_name + orig_ext
+        name = raw_name or Path(path).name
+        
+        dest = os.path.join(dest_dir, name)
+        shutil.copy2(path, dest)
+        log.info("PHYSICAL_ARCHIVE: Copied %s to %s", Path(path).name, dest)
+    except Exception as e:
+        log.warning("PHYSICAL_ARCHIVE: Failed to copy to Tfatleek_Output: %s", e)
+
 
 def process_file(path: str) -> None:
     name = Path(path).name
     log.info("Classifying: %s", name)
 
-    c = classify(path)
+    file_hash = compute_hash(path)
+    if is_already_processed(file_hash):
+        log.info("DEDUP: %s already processed (hash match), skipping", name)
+        return
 
-    # Ollama can hold the thread for up to 90 s; re-verify the file is still present
-    # before touching it (another process, a Paperless consumption watcher, or a
-    # second SMB event may have consumed it in the meantime).
+    snippet = extract_snippet(path)
+    c = classify_document(path, snippet)
+
+    # classify_document can hold the thread for up to 90s; re-verify the file is still present.
     if not os.path.exists(path):
         log.warning(
             "File vanished during classification (consumed by another process?): %s", name
         )
         return
 
-    if c:
-        score    = c.get("confidence_score", 0.0)
-        category = c.get("category", "unknown")
-        log.info("Classification — category=%s, score=%.2f, tax=%s, member=%s",
-                 category, score, c.get("tax_relevant"), c.get("identified_member"))
-        dest = route_to_taxonomy(path, c)
-        submit_to_paperless(dest if dest else path, c)
+    c = apply_rules(c)
+    copy_to_output(path, c)
+
+    tier  = c.get("_tier", 3)
+    score = c.get("confidence_score", 0.0)
+    log.info("Classification — category=%s, score=%.2f, tax=%s, member=%s, engine=%s, tier=%d",
+             c.get("category"), score, c.get("tax_relevant"), c.get("identified_member"),
+             c.get("_engine"), tier)
+
+    if tier == 3:
+        log.warning("SAFE_LANDING: %s submitted to Paperless inbox unclassified", name)
+        if not submit_to_paperless(path):
+            _move_to_pending(path, "Paperless submission failed (safe landing)")
+        else:
+            mark_processed(file_hash, name)
+        return
+
+    dest = route_to_taxonomy(path, c)
+    submit_path = dest if dest else path
+    if not submit_to_paperless(submit_path, c):
+        _move_to_pending(submit_path, "Paperless submission failed")
     else:
-        log.warning("Classification unavailable — direct Paperless ingest: %s", name)
-        submit_to_paperless(path)
+        mark_processed(file_hash, name)
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +618,9 @@ def main() -> None:
     _check_paperless_auth()
     _warmup_ollama()
 
+    load_rules()
+    setup_sighup_reload()
+
     log.info("tfatleek-watcher v2 — monitoring: %s", INBOX_PATH)
     log.info("AI: %s @ %s | confidence threshold: %.2f", OLLAMA_MODEL, OLLAMA_URL, CONFIDENCE_THRESHOLD)
     log.info("Taxonomy root: %s | Settle: %d × %.1fs", TAXONOMY_ROOT, SETTLE_POLLS, SETTLE_INTERVAL)
@@ -475,6 +629,10 @@ def main() -> None:
     observer = Observer()
     observer.schedule(handler, str(inbox), recursive=False)
     observer.start()
+    try:
+        Path(TAXONOMY_ROOT, "watcher_startup.txt").write_text("startup-ok\n")
+    except OSError as e:
+        log.warning("Could not write startup sentinel: %s", e)
     try:
         while observer.is_alive():
             observer.join(timeout=5)

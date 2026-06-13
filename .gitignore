@@ -47,3 +47,9 @@ deleted/
 **/.env
 __pycache__/
 *.pyc
+
+
+
+
+# Ignore Smart Environment folder
+.smart-env

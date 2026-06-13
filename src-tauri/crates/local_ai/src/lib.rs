@@ -17,6 +17,8 @@ pub struct AiClassificationResult {
     pub reasoning: String,
     pub tax_relevant: bool,
     pub identified_member: Option<String>,
+    pub monetary_amount: Option<String>,
+    pub document_date: Option<String>,
 }
 
 pub async fn request_file_classification(
@@ -45,6 +47,8 @@ pub async fn request_file_classification(
     Evaluate if the document has high semantic affinity to tax preparation or fiscal reporting and set 'tax_relevant' accordingly. \
     Also check if the content mentions any family members: Tareg Mohamed Ahmed Shek (Father), Miluda Bashir Shek (Mother), Fatima Shek (Daughter), or Sama Shek (Daughter). \
     If a clear match is found, return their full name in 'identified_member'. \
+    Extract any invoice totals, bill amounts, salary statements, or transaction fees as a string containing the number and currency symbol (e.g., '145.50 €') in 'monetary_amount' (return null if none). \
+    Extract the explicit date printed on the letter or invoice in ISO 8601 string format (YYYY-MM-DD) in 'document_date' (do not return the current system date; parse the document text strictly, return null if unreadable). \
     Return your answer strictly within the JSON schema constraint.";
 
     let user_content = format!(
@@ -70,9 +74,11 @@ pub async fn request_file_classification(
                 "confidence_score": { "type": "number" },
                 "tax_relevant": { "type": "boolean" },
                 "reasoning": { "type": "string" },
-                "identified_member": { "type": ["string", "null"] }
+                "identified_member": { "type": ["string", "null"] },
+                "monetary_amount": { "type": ["string", "null"] },
+                "document_date": { "type": ["string", "null"] }
             },
-            "required": ["suggested_subfolder", "category", "correspondent", "new_clean_name", "confidence_score", "tax_relevant", "reasoning", "identified_member"]
+            "required": ["suggested_subfolder", "category", "correspondent", "new_clean_name", "confidence_score", "tax_relevant", "reasoning", "identified_member", "monetary_amount", "document_date"]
         },
         "options": {
             "temperature": 0.0,
@@ -152,7 +158,9 @@ async fn request_gemini_classification(
         - confidence_score (number, 0.0 to 1.0) \
         - tax_relevant (boolean) \
         - reasoning (string) \
-        - identified_member (string or null, full name if matched)
+        - identified_member (string or null, full name if matched) \
+        - monetary_amount (string or null, e.g. '145.50 €') \
+        - document_date (string or null, ISO 8601 YYYY-MM-DD)
 
         Family members: Tareg Mohamed Ahmed Shek (Father), Miluda Bashir Shek (Mother), Fatima Shek (Daughter), Sama Shek (Daughter).
 

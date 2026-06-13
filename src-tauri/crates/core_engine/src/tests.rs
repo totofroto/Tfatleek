@@ -24,13 +24,19 @@ mod tests {
     async fn test_case_1_root_path_intercept_guardrail() {
         let (handle, _test_dir, db_path) = setup_test_env("tc1");
         
-        let res1 = execute_batch_organization(handle.clone(), "/users/taregahmed/desktop", &db_path, "dummy").await;
+        let res1 = execute_batch_organization(handle.clone(), "/users/taregahmed/desktop", &db_path).await;
         assert!(res1.is_err());
 
-        let res2 = execute_batch_organization(handle.clone(), "/Users/TaregAhmed/Documents", &db_path, "dummy").await;
+        let res2 = execute_batch_organization(handle.clone(), "/Users/TaregAhmed/Documents", &db_path).await;
         assert!(res2.is_err());
 
-        let res3 = execute_batch_organization(handle.clone(), "/", &db_path, "dummy").await;
+        let res_m4_1 = execute_batch_organization(handle.clone(), "/users/taregshek/desktop", &db_path).await;
+        assert!(res_m4_1.is_err());
+
+        let res_m4_2 = execute_batch_organization(handle.clone(), "/Users/TaregShek/Documents", &db_path).await;
+        assert!(res_m4_2.is_err());
+
+        let res3 = execute_batch_organization(handle.clone(), "/", &db_path).await;
         assert!(res3.is_err());
 
         let res4 = query_contextual_memory_match(handle.clone(), "/".to_string()).await;
@@ -63,7 +69,7 @@ mod tests {
             db.upsert_file(&record).unwrap();
         }
 
-        let res = execute_batch_organization(handle.clone(), &test_dir, &db_path, "dummy").await;
+        let res = execute_batch_organization(handle.clone(), &test_dir, &db_path).await;
         assert!(res.is_ok());
 
         // Because local_ai isn't fully mocked here, actual processing will just return OK overall
@@ -93,7 +99,7 @@ mod tests {
             ).unwrap();
         }
 
-        let res = query_contextual_memory_match(handle.clone(), "fuzzy_data.pdf".to_string()).await.unwrap();
+        let res = query_contextual_memory_match(handle.clone(), "fuzzy_report_2026.pdf".to_string()).await.unwrap();
         assert_eq!(res, Some("/path/to/financial".to_string()));
     }
 

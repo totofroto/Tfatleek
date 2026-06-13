@@ -56,6 +56,8 @@ pub struct FileIndexEntry {
     pub tax_relevant: bool,
     pub suggested_subfolder: Option<String>,
     pub identified_member: Option<String>,
+    pub monetary_amount: Option<String>,
+    pub document_date: Option<String>,
 }
 
 impl DbManager {
@@ -93,6 +95,8 @@ impl DbManager {
                 tax_relevant INTEGER DEFAULT 0,
                 is_tax_relevant INTEGER DEFAULT 0,
                 identified_member TEXT,
+                monetary_amount TEXT,
+                document_date TEXT,
                 ai_processed_at INTEGER,
                 FOREIGN KEY(file_id) REFERENCES file_index(id) ON DELETE CASCADE
             );
@@ -139,6 +143,11 @@ impl DbManager {
                 sort_order INTEGER DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
             INSERT OR IGNORE INTO smart_groups
                 (name, icon, filter_category, filter_tax_relevant, created_at, sort_order)
             VALUES
@@ -168,6 +177,12 @@ impl DbManager {
                 if columns.contains(&"is_tax_relevant".to_string()) {
                     conn.execute("UPDATE ai_metadata SET tax_relevant = is_tax_relevant WHERE tax_relevant = 0;", [])?;
                 }
+            }
+            if !columns.contains(&"monetary_amount".to_string()) {
+                conn.execute("ALTER TABLE ai_metadata ADD COLUMN monetary_amount TEXT;", [])?;
+            }
+            if !columns.contains(&"document_date".to_string()) {
+                conn.execute("ALTER TABLE ai_metadata ADD COLUMN document_date TEXT;", [])?;
             }
         }
 
@@ -293,7 +308,8 @@ impl DbManager {
             "SELECT fi.id, fi.file_path, fi.file_name, fi.file_size, fi.modified_at,
                     COALESCE(am.category, ''), COALESCE(am.correspondent, ''),
                     COALESCE(am.confidence_score, 0.0), COALESCE(am.tax_relevant, 0),
-                    am.suggested_subfolder, am.identified_member
+                    am.suggested_subfolder, am.identified_member,
+                    am.monetary_amount, am.document_date
              FROM file_index fi
              LEFT JOIN ai_metadata am ON fi.id = am.file_id
              WHERE (?1 IS NULL OR am.category = ?1)
@@ -321,6 +337,8 @@ impl DbManager {
                     tax_relevant: row.get::<_, i32>(8)? != 0,
                     suggested_subfolder: row.get(9)?,
                     identified_member: row.get(10)?,
+                    monetary_amount: row.get(11)?,
+                    document_date: row.get(12)?,
                 })
             }
         )?.collect::<Result<Vec<_>>>()?;
@@ -376,6 +394,113 @@ impl DbManager {
     pub fn delete_smart_group(&self, group_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM smart_groups WHERE id = ?1", params![group_id])?;
+        Ok(())
+    }
+
+    pub fn get_related_documents(&self, file_id_str: &str) -> Result<Vec<FileIndexEntry>> {
+        let file_id: i64 = file_id_str.parse().unwrap_or(0);
+        if file_id == 0 {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().unwrap();
+
+        let target: Option<(Option<String>, Option<String>)> = conn.query_row(
+            "SELECT correspondent, monetary_amount FROM ai_metadata WHERE file_id = ?1",
+            params![file_id],
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ).ok();
+
+        let Some((correspondent, monetary_amount)) = target else {
+            return Ok(vec![]);
+        };
+
+        let corr_empty = correspondent.as_ref().map_or(true, |s| s.trim().is_empty());
+        let mon_empty = monetary_amount.as_ref().map_or(true, |s| s.trim().is_empty());
+        if corr_empty && mon_empty {
+            return Ok(vec![]);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT fi.id, fi.file_path, fi.file_name, fi.file_size, fi.modified_at,
+                    COALESCE(am.category, ''), COALESCE(am.correspondent, ''),
+                    COALESCE(am.confidence_score, 0.0), COALESCE(am.tax_relevant, 0),
+                    am.suggested_subfolder, am.identified_member,
+                    am.monetary_amount, am.document_date
+             FROM file_index fi
+             LEFT JOIN ai_metadata am ON fi.id = am.file_id
+             WHERE fi.id != ?1
+               AND (
+                 (?2 IS NOT NULL AND ?2 != '' AND am.correspondent = ?2)
+                 OR
+                 (?3 IS NOT NULL AND ?3 != '' AND am.monetary_amount = ?3)
+               )
+             ORDER BY fi.file_name ASC"
+        )?;
+
+        let entries = stmt.query_map(
+            params![file_id, correspondent, monetary_amount],
+            |row| {
+                let cat: String = row.get(5)?;
+                let corr: String = row.get(6)?;
+                Ok(FileIndexEntry {
+                    id: row.get(0)?,
+                    file_path: row.get(1)?,
+                    file_name: row.get(2)?,
+                    file_size: row.get(3)?,
+                    modified_at: row.get(4)?,
+                    category: if cat.is_empty() { None } else { Some(cat) },
+                    correspondent: if corr.is_empty() { None } else { Some(corr) },
+                    confidence_score: row.get(7)?,
+                    tax_relevant: row.get::<_, i32>(8)? != 0,
+                    suggested_subfolder: row.get(9)?,
+                    identified_member: row.get(10)?,
+                    monetary_amount: row.get(11)?,
+                    document_date: row.get(12)?,
+                })
+            }
+        )?.collect::<Result<Vec<_>>>()?;
+
+        Ok(entries)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let val = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0)
+        ).ok();
+        Ok(val)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_metadata_from_paperless(&self, file_name: &str, new_correspondent: Option<String>, new_date: Option<String>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        
+        let mut stmt = conn.prepare("SELECT id FROM file_index WHERE file_name = ?1")?;
+        let ids: Vec<i64> = stmt.query_map(params![file_name], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+            
+        for id in ids {
+            conn.execute(
+                "INSERT INTO ai_metadata (file_id, correspondent, document_date)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(file_id) DO UPDATE SET
+                    correspondent = excluded.correspondent,
+                    document_date = excluded.document_date",
+                params![id, new_correspondent, new_date]
+            )?;
+        }
         Ok(())
     }
 }
@@ -476,6 +601,95 @@ mod tests {
         assert_eq!(created.name, "My Group");
         assert!(created.id > 4);
         db.delete_smart_group(created.id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_schema_migration_success() -> Result<()> {
+        let db = DbManager::init(":memory:")?;
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(ai_metadata);")?;
+        let columns: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert!(columns.contains(&"monetary_amount".to_string()));
+        assert!(columns.contains(&"document_date".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_knowledge_graph_relations() -> Result<()> {
+        let db = DbManager::init(":memory:")?;
+        
+        // Insert File A
+        db.upsert_file(&FileRecord {
+            id: None,
+            file_path: "/path/A.pdf".to_string(),
+            file_name: "A.pdf".to_string(),
+            file_size: 100,
+            modified_at: 1000,
+            partial_hash: None,
+            full_hash: None,
+            is_nas_path: false,
+        })?;
+
+        // Insert File B
+        db.upsert_file(&FileRecord {
+            id: None,
+            file_path: "/path/B.pdf".to_string(),
+            file_name: "B.pdf".to_string(),
+            file_size: 200,
+            modified_at: 2000,
+            partial_hash: None,
+            full_hash: None,
+            is_nas_path: false,
+        })?;
+
+        // Insert File C
+        db.upsert_file(&FileRecord {
+            id: None,
+            file_path: "/path/C.pdf".to_string(),
+            file_name: "C.pdf".to_string(),
+            file_size: 300,
+            modified_at: 3000,
+            partial_hash: None,
+            full_hash: None,
+            is_nas_path: false,
+        })?;
+
+        let conn = db.conn.lock().unwrap();
+
+        // Get IDs
+        let id_a: i64 = conn.query_row("SELECT id FROM file_index WHERE file_path = ?1", params!["/path/A.pdf"], |r| r.get(0))?;
+        let id_b: i64 = conn.query_row("SELECT id FROM file_index WHERE file_path = ?1", params!["/path/B.pdf"], |r| r.get(0))?;
+        let id_c: i64 = conn.query_row("SELECT id FROM file_index WHERE file_path = ?1", params!["/path/C.pdf"], |r| r.get(0))?;
+
+        // Insert ai_metadata for A, B, C
+        conn.execute(
+            "INSERT INTO ai_metadata (file_id, category, correspondent, confidence_score, tax_relevant) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id_a, "Utilities", "Stadtwerke", 0.95, 1]
+        )?;
+        conn.execute(
+            "INSERT INTO ai_metadata (file_id, category, correspondent, confidence_score, tax_relevant) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id_b, "Utilities", "Stadtwerke", 0.90, 1]
+        )?;
+        conn.execute(
+            "INSERT INTO ai_metadata (file_id, category, correspondent, confidence_score, tax_relevant) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id_c, "Utilities", "Other", 0.85, 0]
+        )?;
+
+        // Drop lock before calling get_related_documents to avoid deadlock
+        drop(conn);
+
+        // Call get_related_documents targeting File A
+        let related = db.get_related_documents(&id_a.to_string())?;
+
+        // Assert: should return exactly 1 related document (File B), excluding File A and File C
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].id, id_b);
+        assert_eq!(related[0].file_name, "B.pdf");
+
         Ok(())
     }
 }

@@ -137,6 +137,74 @@ fn verify_manifest_entry(
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PendingFile {
+    pub filename: String,
+    pub size_bytes: u64,
+    pub modified_at: u64,
+}
+
+#[tauri::command]
+fn get_pending_queue_status(pending_path: Option<String>) -> Result<Vec<PendingFile>, String> {
+    let path_str = pending_path.unwrap_or_else(|| "/Volumes/Papers/Tfatleek_Inbox/_pending/".to_string());
+    
+    // Safety check for absolute path guards
+    let path_lower = path_str.to_lowercase();
+    if path_lower == "/" || 
+       path_lower == "/users/taregahmed/desktop" || path_lower == "/users/taregahmed/documents" ||
+       path_lower == "/users/taregshek/desktop" || path_lower == "/users/taregshek/documents" {
+        return Err("Error: Direct root directory targeting is restricted for system safety.".to_string());
+    }
+
+    let dir_path = std::path::Path::new(&path_str);
+    if !dir_path.exists() || !dir_path.is_dir() {
+        return Ok(vec![]);
+    }
+
+    let entries = match std::fs::read_dir(dir_path) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let mut pending_files = Vec::new();
+    for entry_result in entries {
+        if let Ok(entry) = entry_result {
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            
+            if file_type.is_file() {
+                let filename = entry.file_name().to_string_lossy().into_owned();
+                
+                // Skip hidden files
+                if filename.starts_with('.') {
+                    continue;
+                }
+
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                let size_bytes = metadata.len();
+                let modified_at = metadata.modified()
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+                    .unwrap_or(0);
+
+                pending_files.push(PendingFile {
+                    filename,
+                    size_bytes,
+                    modified_at,
+                });
+            }
+        }
+    }
+
+    pending_files.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    Ok(pending_files)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct WatcherHealth {
     pub status: String,
     pub timestamp: String,
@@ -269,7 +337,8 @@ fn get_db_path(handle: &tauri::AppHandle) -> String {
 #[tauri::command]
 async fn start_dedup_scan(handle: tauri::AppHandle, target_path: String) -> Result<String, String> {
     let target_lower = target_path.to_lowercase();
-    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" {
+    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" ||
+       target_lower == "/users/taregshek/desktop" || target_lower == "/users/taregshek/documents" {
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
     let db_path = get_db_path(&handle);
@@ -350,7 +419,9 @@ async fn trigger_batch_ai_organization(
     _custom_excludes: Vec<String>
 ) -> Result<String, String> {
     let target_lower = target_path.to_lowercase();
-    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" || target_lower == "/" {
+    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" ||
+       target_lower == "/users/taregshek/desktop" || target_lower == "/users/taregshek/documents" ||
+       target_lower == "/" {
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
 
@@ -373,7 +444,8 @@ async fn fetch_isolated_duplicates(handle: tauri::AppHandle) -> Result<String, S
 #[tauri::command]
 async fn execute_file_deletion(handle: tauri::AppHandle, file_path: String) -> Result<String, String> {
     let target_lower = file_path.to_lowercase();
-    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" {
+    if target_lower == "/users/taregahmed/desktop" || target_lower == "/users/taregahmed/documents" ||
+       target_lower == "/users/taregshek/desktop" || target_lower == "/users/taregshek/documents" {
         return Err("Error: Direct root directory targeting is restricted for system safety. Please target a specific subfolder.".to_string());
     }
     
@@ -530,6 +602,16 @@ async fn get_smart_group_files(
 }
 
 #[tauri::command]
+async fn get_related_documents(
+    handle: tauri::AppHandle,
+    file_id: String,
+) -> Result<Vec<database::FileIndexEntry>, String> {
+    let db_path = get_db_path(&handle);
+    let db = database::DbManager::init(&db_path).map_err(|e| e.to_string())?;
+    db.get_related_documents(&file_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn create_smart_group(
     handle: tauri::AppHandle,
     group: database::NewSmartGroup,
@@ -558,6 +640,122 @@ async fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct N8nExecutionStatus {
+    pub id: String,
+    pub status: String,
+    pub started_at: String,
+    pub stopped_at: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct N8nApiResponse {
+    pub data: Vec<N8nExecutionStatus>,
+}
+
+fn load_env_file() {
+    if let Ok(content) = std::fs::read_to_string(".env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, val)) = line.split_once('=') {
+                std::env::set_var(key.trim(), val.trim());
+            }
+        }
+        return;
+    }
+    if let Ok(content) = std::fs::read_to_string("../.env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, val)) = line.split_once('=') {
+                std::env::set_var(key.trim(), val.trim());
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn get_n8n_workflow_status() -> Result<N8nExecutionStatus, String> {
+    load_env_file();
+
+    let api_key = std::env::var("N8N_API_KEY")
+        .map_err(|_| "N8N_API_KEY environment variable is not set".to_string())?;
+
+    if api_key.trim().is_empty() {
+        return Err("N8N_API_KEY is empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let url = "http://192.168.254.18:5678/api/v1/executions?workflowId=ixR5Sr2qS7QdqCsd&limit=1";
+    let resp = client.get(url)
+        .header("X-N8N-API-KEY", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("n8n API returned error status: {}", resp.status()));
+    }
+
+    let parsed: N8nApiResponse = resp.json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if let Some(execution) = parsed.data.into_iter().next() {
+        Ok(execution)
+    } else {
+        Err("No execution history found for this workflow".to_string())
+    }
+}
+
+async fn start_delta_sync_daemon(handle: tauri::AppHandle) {
+    use chrono::Utc;
+    loop {
+        let db_path = get_db_path(&handle);
+        load_env_file();
+
+        match database::DbManager::init(&db_path) {
+            Ok(db) => {
+                let last_sync = db.get_setting("last_paperless_sync_timestamp")
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+
+                match core_engine::paperless_bridge::fetch_modified_documents(&last_sync).await {
+                    Ok(modified_docs) => {
+                        for doc in modified_docs {
+                            let _ = db.update_metadata_from_paperless(
+                                &doc.file_name,
+                                doc.correspondent.clone(),
+                                doc.created_date.clone(),
+                            );
+                        }
+                        let now_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let _ = db.set_setting("last_paperless_sync_timestamp", &now_iso);
+                    }
+                    Err(e) => {
+                        eprintln!("Delta-Sync Daemon Error: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Delta-Sync Daemon Database Error: {}", e);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+    }
+}
+
 #[tauri::command]
 async fn update_paperless_settings(
     handle: tauri::AppHandle,
@@ -580,6 +778,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                start_delta_sync_daemon(handle).await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_dedup_scan,
             classify_file_with_ai,
@@ -609,7 +814,10 @@ pub fn run() {
             verify_manifest_entry,
             export_manifest_csv,
             get_watcher_health,
-            get_watcher_log_tail
+            get_watcher_log_tail,
+            get_pending_queue_status,
+            get_related_documents,
+            get_n8n_workflow_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

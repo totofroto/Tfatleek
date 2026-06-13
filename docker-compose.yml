@@ -19,6 +19,7 @@ services:
       - ./watcher.py:/app/watcher.py:ro
       - /share/Papers/Tfatleek_Inbox:/share/Papers/Tfatleek_Inbox
       - /share/Papers/Tfatleek:/share/Papers/Tfatleek
+      - /share/Papers/Tfatleek_Output:/share/Papers/Tfatleek_Output
     command: supervisord -c /etc/supervisord.conf
     environment:
       TFATLEEK_INBOX:       /share/Papers/Tfatleek_Inbox

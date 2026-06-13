@@ -10,6 +10,19 @@ interface WatcherHealth {
   interval_seconds: number | null;
 }
 
+interface PendingFile {
+  filename: string;
+  size_bytes: number;
+  modified_at: number;
+}
+
+interface N8nExecutionStatus {
+  id: string;
+  status: string;
+  startedAt: string;
+  stoppedAt: string | null;
+}
+
 interface ServiceStatus {
   name: string;
   url: string;
@@ -18,6 +31,25 @@ interface ServiceStatus {
 
 interface Props {
   heartbeatPath: string;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+function formatTimestamp(isoString: string | null): string {
+  if (!isoString) return "Running...";
+  try {
+    const d = new Date(isoString);
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  } catch {
+    return isoString;
+  }
 }
 
 function logLineColor(line: string): string {
@@ -34,28 +66,44 @@ function logLineColor(line: string): string {
 export default function WatcherHealthDashboard({ heartbeatPath }: Props) {
   const [health, setHealth] = useState<WatcherHealth | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [secondsSinceUpdate, setSecondsSinceUpdate] = useState(0);
   const [services, setServices] = useState<ServiceStatus[]>([
     { name: "Paperless-ngx", url: "http://192.168.254.15:25680", status: "checking" },
     { name: "Ollama", url: "http://192.168.254.15:11434", status: "checking" },
   ]);
+  const [n8nStatus, setN8nStatus] = useState<N8nExecutionStatus | null>(null);
+  const [n8nError, setN8nError] = useState<string | null>(null);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const logPath = heartbeatPath.replace("watcher_heartbeat.json", "watcher.log");
+  const pendingPath = heartbeatPath.replace("Tfatleek/watcher_heartbeat.json", "Tfatleek_Inbox/_pending");
 
   const fetchData = useCallback(async () => {
     try {
-      const [h, lines] = await Promise.all([
+      const [h, lines, pending] = await Promise.all([
         invoke<WatcherHealth>("get_watcher_health", { heartbeatPath }),
         invoke<string[]>("get_watcher_log_tail", { logPath, lines: 30 }),
+        invoke<PendingFile[]>("get_pending_queue_status", { pendingPath }),
       ]);
       setHealth(h);
       setLogLines(lines);
+      setPendingFiles(pending);
       setSecondsSinceUpdate(0);
     } catch (e) {
       console.error("Failed to fetch watcher data:", e);
     }
-  }, [heartbeatPath, logPath]);
+
+    try {
+      const n8n = await invoke<N8nExecutionStatus>("get_n8n_workflow_status");
+      setN8nStatus(n8n);
+      setN8nError(null);
+    } catch (e) {
+      console.error("Failed to fetch n8n status:", e);
+      setN8nError(String(e));
+      setN8nStatus(null);
+    }
+  }, [heartbeatPath, logPath, pendingPath]);
 
   const checkServices = useCallback(async () => {
     const probe = async (name: string, url: string) => {
@@ -236,7 +284,105 @@ export default function WatcherHealthDashboard({ heartbeatPath }: Props) {
               />
             </div>
           </div>
+
+          {/* n8n AI Enrichment */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div
+                className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  n8nStatus === null
+                    ? n8nError
+                      ? "bg-red-500"
+                      : "bg-neutral-600 animate-pulse"
+                    : n8nStatus.status === "success"
+                    ? "bg-emerald-500"
+                    : n8nStatus.status === "running"
+                    ? "bg-amber-500 animate-pulse"
+                    : "bg-red-500"
+                }`}
+              />
+              <span className="text-xs font-bold text-neutral-300">n8n AI Enrichment</span>
+            </div>
+            <div className="flex items-center gap-3">
+              {n8nStatus && (
+                <span className="text-[10px] font-mono text-neutral-500">
+                  Last Sweep: {formatTimestamp(n8nStatus.stoppedAt)}
+                </span>
+              )}
+              {n8nError && (
+                <span className="text-[9px] font-mono text-red-500/80 truncate max-w-[150px]" title={n8nError}>
+                  {n8nError}
+                </span>
+              )}
+              <StatusBadge
+                status={
+                  n8nStatus === null
+                    ? n8nError
+                      ? "offline"
+                      : "checking"
+                    : n8nStatus.status === "success"
+                    ? "online"
+                    : n8nStatus.status === "running"
+                    ? "stale"
+                    : "offline"
+                }
+                label={
+                  n8nStatus === null
+                    ? n8nError
+                      ? "error"
+                      : "checking"
+                    : n8nStatus.status === "success"
+                    ? "success"
+                    : n8nStatus.status === "running"
+                    ? "running"
+                    : "error"
+                }
+              />
+            </div>
+          </div>
         </div>
+      </div>
+
+      {/* ── Retry Queue ── */}
+      <div className="bg-neutral-900/50 border border-neutral-800 rounded-2xl p-5 flex-shrink-0">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-[10px] font-black uppercase tracking-widest text-neutral-500">
+            Retry Queue
+          </h3>
+          {pendingFiles.length === 0 ? (
+            <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded border text-emerald-400 bg-emerald-900/20 border-emerald-800/30">
+              Queue Clear
+            </span>
+          ) : (
+            <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded border text-yellow-400 bg-yellow-900/20 border-yellow-800/30 animate-pulse">
+              {pendingFiles.length} Pending
+            </span>
+          )}
+        </div>
+
+        {pendingFiles.length === 0 ? (
+          <p className="text-xs text-neutral-400 font-bold">
+            No files currently in the retry queue.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div className="max-h-24 overflow-y-auto space-y-2 pr-2">
+              {pendingFiles.map((file, idx) => (
+                <div key={idx} className="flex items-center justify-between text-xs">
+                  <span className="font-mono text-neutral-300 truncate max-w-md" title={file.filename}>
+                    {file.filename}
+                  </span>
+                  <span className="font-mono text-neutral-500">
+                    {formatBytes(file.size_bytes)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] text-yellow-500/80 italic font-mono pt-1">
+              * Awaiting next 5-minute retry worker sweep.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* ── Log tail ── */}
